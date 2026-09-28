@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import { FastifyReply } from "fastify";
 import { Page } from "patchright";
 import { CDPService } from "../../services/cdp/cdp.service.js";
@@ -75,6 +74,8 @@ async function withScraperSession<T>(
         await proxy.close(true).catch(() => {});
       }
       // Belt-and-braces: if startSession threw, make sure nothing is left over.
+      // endSession is guarded so concurrent lifecycles never double-release;
+      // a full browser shutdown is only forced if ending the session fails.
       try {
         if (sessionService.activeSession.status === "live") {
           await sessionService.endSession({ relaunchIdle: false });
@@ -82,9 +83,6 @@ async function withScraperSession<T>(
       } catch {
         await browserService.shutdown(ShutdownReason.SESSION_END).catch(() => {});
       }
-      try {
-        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
-      } catch {}
     }
   });
 }

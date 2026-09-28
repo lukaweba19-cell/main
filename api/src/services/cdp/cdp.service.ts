@@ -332,6 +332,7 @@ export class CDPService extends EventEmitter {
       const launchProcess = (async () => {
         const shouldReuseInstance =
           this.browserInstance &&
+          !this.shuttingDown &&
           (await isSimilarConfig(this.launchConfig, config || this.defaultLaunchConfig));
 
         if (shouldReuseInstance) {
@@ -938,9 +939,14 @@ export class CDPService extends EventEmitter {
       options: { ...((config && config.options) || {}) },
     };
     const run = async () => {
+      // Wait out any in-flight shutdown so we never launch into (or reuse)
+      // a browser that is being torn down.
+      for (let i = 0; i < 100 && this.shuttingDown; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
       if (this.isRunning() && this.browserInstance) return;
       await this.launch(merged);
-      if (!this.browserInstance) {
+      if (!this.browserInstance || !this.browserInstance.isConnected()) {
         throw new Error("Browser instance not initialized after launch");
       }
     };
@@ -1223,7 +1229,12 @@ export class CDPService extends EventEmitter {
     this.logger.info("Ending current session and resetting to default configuration.");
     const sessionConfig = this.currentSessionConfig;
 
-    this.sessionContext = await this.getBrowserState().catch(() => null);
+    // getBrowserState dumps cookies/storage over CDP; bound it so a dying
+    // browser cannot stall session teardown indefinitely.
+    this.sessionContext = await Promise.race([
+      this.getBrowserState().catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
 
     try {
       if (sessionConfig) {

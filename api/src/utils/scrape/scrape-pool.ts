@@ -94,6 +94,6 @@ export class ScrapePool {
   }
 }
 
-const max = Math.max(1, parseInt(process.env.SCRAPE_MAX_CONCURRENCY || "3", 10) || 3);
+const max = Math.max(1, parseInt(process.env.SCRAPE_MAX_CONCURRENCY || "1", 10) || 1);
 const idleMs = Math.max(0, parseInt(process.env.SCRAPE_IDLE_SHUTDOWN_MS || "15000", 10) || 15000);
 export const scrapePool = new ScrapePool(max, idleMs);
