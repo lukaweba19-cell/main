@@ -2,12 +2,23 @@ import { useSessionsContext } from "@/hooks/use-sessions-context";
 import { Skeleton } from "@radix-ui/themes";
 import { ReleaseSessionDialog } from "../release-session-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  GlobeIcon,
+  MagicWandIcon,
+  VideoIcon,
+  MinusIcon,
+  CheckIcon,
+} from "@radix-ui/react-icons";
 
 function Row({ label, value, mono }: { label: string; value: any; mono?: boolean }) {
   return (
-    <div className="flex w-full flex-row gap-3 justify-between py-2.5 border-b border-[var(--gray-6)]">
-      <div className="text-[var(--gray-10)] shrink-0">{label}</div>
-      <div className={`text-right text-[var(--gray-12)] break-all ${mono ? "font-mono text-[11px]" : ""}`}>
+    <div className="flex w-full flex-row gap-4 justify-between items-baseline py-2.5">
+      <div className="text-sm text-[var(--gray-11)] shrink-0">{label}</div>
+      <div
+        className={`text-right text-sm text-[var(--gray-12)] break-all min-w-0 ${
+          mono ? "font-mono text-xs" : ""
+        }`}
+      >
         {value ?? "—"}
       </div>
     </div>
@@ -17,19 +28,30 @@ function Row({ label, value, mono }: { label: string; value: any; mono?: boolean
 function Feature({
   label,
   on,
+  icon,
 }: {
   label: string;
   on: boolean | null;
+  icon: React.ReactNode;
 }) {
   return (
-    <div className="flex w-full items-center justify-between py-2 border-b border-[var(--gray-6)]">
-      <span className="text-[var(--gray-11)]">{label}</span>
+    <div className="flex w-full items-center justify-between py-2.5">
+      <span className="flex items-center gap-2.5 text-sm text-[var(--gray-12)]">
+        <span className="text-[var(--gray-10)]">{icon}</span>
+        {label}
+      </span>
       {on === null ? (
-        <span className="text-[var(--gray-9)] text-xs">—</span>
+        <span className="flex items-center gap-1 text-[var(--gray-9)] text-sm">
+          <MinusIcon className="w-3.5 h-3.5" /> Off
+        </span>
       ) : on ? (
-        <span className="text-[var(--green-11)] text-xs font-medium">✓ On</span>
+        <span className="flex items-center gap-1.5 text-[var(--green-11)] text-sm">
+          <CheckIcon className="w-3.5 h-3.5" /> On
+        </span>
       ) : (
-        <span className="text-[var(--gray-9)] text-xs">– Off</span>
+        <span className="flex items-center gap-1 text-[var(--gray-9)] text-sm">
+          <MinusIcon className="w-3.5 h-3.5" /> Off
+        </span>
       )}
     </div>
   );
@@ -41,7 +63,8 @@ function formatDuration(ms?: number) {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  if (h > 0)
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
@@ -60,7 +83,7 @@ export default function SessionDetails({ id }: { id: string | null }) {
   }
 
   if (isError || !session) {
-    return <div className="p-4 text-[var(--red-11)]">Error loading session</div>;
+    return <div className="p-4 text-sm text-[var(--red-11)]">Error loading session</div>;
   }
 
   const dims = session.dimensions;
@@ -68,53 +91,46 @@ export default function SessionDetails({ id }: { id: string | null }) {
     dims?.width && dims?.height ? `${dims.width} × ${dims.height}` : "—";
 
   return (
-    <div className="w-full h-full overflow-y-auto bg-[var(--gray-2)] p-4 text-xs flex flex-col">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-        <div className="rounded-md border border-[var(--gray-6)] p-3">
-          <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)]">Duration</div>
-          <div className="text-sm font-medium text-[var(--gray-12)] mt-1 tabular-nums">
-            {formatDuration(Number(session.duration) || 0)}
-          </div>
-        </div>
-        <div className="rounded-md border border-[var(--gray-6)] p-3">
-          <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)]">Started</div>
-          <div className="text-sm font-medium text-[var(--gray-12)] mt-1">
-            {session.createdAt
-              ? new Date(session.createdAt).toLocaleString()
-              : "—"}
-          </div>
-        </div>
-        <div className="rounded-md border border-[var(--gray-6)] p-3">
-          <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)]">Viewport</div>
-          <div className="text-sm font-medium text-[var(--gray-12)] mt-1">{viewport}</div>
-        </div>
-        <div className="rounded-md border border-[var(--gray-6)] p-3">
-          <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)]">Status</div>
-          <div className="text-sm font-medium text-[var(--gray-12)] mt-1 capitalize">
-            {session.status}
-          </div>
-        </div>
+    <div className="w-full px-4 py-3 text-[var(--gray-12)] flex flex-col divide-y divide-[var(--gray-6)]">
+      <div className="pb-1">
+        <Row label="Viewport" value={viewport} mono />
       </div>
 
-      <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)] mb-1">Session</div>
-      <Row label="ID" value={session.id} mono />
-      <Row
-        label="User Agent"
-        value={session.userAgent || "—"}
-        mono
-      />
-      <Row label="Proxy" value={session.proxy || "—"} mono />
-      <Row label="Websocket" value={session.websocketUrl || "—"} mono />
-
-      <div className="text-[10px] uppercase tracking-wide text-[var(--gray-9)] mt-5 mb-1">
-        Features
+      <div className="py-3">
+        <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--gray-9)] mb-1.5">
+          Features
+        </div>
+        <Feature label="Captcha solver (NopeCHA)" on={true} icon={<MagicWandIcon />} />
+        <Feature label="Proxy" on={!!session.proxy} icon={<GlobeIcon />} />
+        <Feature
+          label="Video recording"
+          on={session.status !== "live"}
+          icon={<VideoIcon />}
+        />
       </div>
-      <Feature label="Captcha solver (NopeCHA)" on={true} />
-      <Feature label="Proxy" on={!!session.proxy} />
-      <Feature label="Video recording" on={session.status !== "live"} />
+
+      <div className="pt-3">
+        <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--gray-9)] mb-1.5">
+          Recording
+        </div>
+        <Row
+          label="Duration"
+          value={formatDuration(Number(session.duration) || 0)}
+          mono
+        />
+        <Row label="File" value={session.id ? `${session.id.slice(0, 8)}.mp4` : "—"} mono />
+        <Row label="Status" value={session.status === "live" ? "Recording…" : "Saved"} />
+      </div>
+
+      <div className="pt-4">
+        <Row label="ID" value={session.id} mono />
+        <Row label="User Agent" value={session.userAgent || "—"} mono />
+        <Row label="Proxy" value={session.proxy || "—"} mono />
+        <Row label="Websocket" value={session.websocketUrl || "—"} mono />
+      </div>
 
       {session.status === "live" && (
-        <div className="mt-auto border-t border-[var(--gray-6)] pt-4">
+        <div className="pt-4">
           <ReleaseSessionDialog id={id!}>
             <Button
               variant="outline"

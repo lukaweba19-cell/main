@@ -2,6 +2,7 @@ import { useSessionsContext } from "@/hooks/use-sessions-context";
 import { useRef, useEffect, useCallback, useState } from "react";
 import "./session-viewer-controls.css";
 import { LoadingSpinner } from "@/components/icons/LoadingSpinner";
+import { PlayIcon, PauseIcon } from "@radix-ui/react-icons";
 import { env } from "@/env";
 
 type SessionViewerProps = {
@@ -9,6 +10,13 @@ type SessionViewerProps = {
 };
 
 let clipboardBridgeActive = false;
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 export function SessionViewer({ id }: SessionViewerProps) {
   const { useSession } = useSessionsContext();
@@ -20,11 +28,17 @@ export function SessionViewer({ id }: SessionViewerProps) {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [recState, setRecState] = useState<
     "idle" | "loading" | "video" | "empty" | "error"
   >("idle");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [recError, setRecError] = useState<string | null>(null);
+
+  // Playback state for the custom scrubber
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
 
   const isLive = session?.status === "live";
 
@@ -130,16 +144,34 @@ export function SessionViewer({ id }: SessionViewerProps) {
     };
   }, [handleMessage, isLive]);
 
+  const togglePlay = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    video.currentTime = ratio * video.duration;
+  };
+
   if (isSessionLoading)
     return (
-      <div className="flex items-center justify-center w-full h-full">
+      <div className="flex items-center justify-center w-full aspect-video">
         <LoadingSpinner className="w-8 h-8" />
       </div>
     );
 
   if (isSessionError || !session)
     return (
-      <div className="flex items-center justify-center w-full h-full border border-[var(--gray-6)]">
+      <div className="flex items-center justify-center w-full aspect-video">
         <h1 className="text-[var(--tomato-5)]">Error loading session</h1>
       </div>
     );
@@ -148,7 +180,7 @@ export function SessionViewer({ id }: SessionViewerProps) {
     return (
       <div
         ref={containerRef}
-        className="flex flex-col w-full overflow-hidden flex-1 border-t border-[var(--gray-6)]"
+        className="flex flex-col w-full overflow-hidden"
         tabIndex={0}
         style={{ outline: "none" }}
       >
@@ -158,53 +190,93 @@ export function SessionViewer({ id }: SessionViewerProps) {
             session?.debugUrl?.includes("?") ? "&" : "?"
           }clipboardBridge=true`}
           sandbox="allow-same-origin allow-scripts allow-clipboard-write allow-clipboard-read"
-          className="w-full max-h-full aspect-[16/10] border border-[var(--gray-6)]"
+          className="w-full aspect-[16/10]"
           allow="clipboard-read; clipboard-write"
         />
+        <div className="px-4 py-2.5 border-t border-[var(--gray-6)] bg-[var(--gray-3)] flex items-center justify-between">
+          <span className="text-xs text-[var(--gray-11)]">
+            Live session — viewing the browser in real time
+          </span>
+          <span className="flex items-center gap-1.5 text-xs text-[var(--green-11)]">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--green-11)] animate-pulse" />
+            Live
+          </span>
+        </div>
       </div>
     );
   }
 
+  const progress =
+    videoDuration > 0 ? Math.min(100, (currentTime / videoDuration) * 100) : 0;
+
   return (
-    <div className="flex flex-col w-full overflow-hidden flex-1 border-t border-[var(--gray-6)] bg-[var(--gray-2)]">
-      <div className="px-3 py-2 text-xs text-[var(--gray-11)] border-b border-[var(--gray-6)] flex items-center justify-between">
-        <span>
-          Session <span className="font-mono text-primary">{id.slice(0, 8)}</span> · status{" "}
-          <span className="text-primary">{session.status}</span>
-        </span>
-        <span>Recording playback</span>
-      </div>
+    <div className="flex flex-col w-full">
       {recState === "loading" && (
-        <div className="flex items-center justify-center flex-1 gap-2 text-[var(--gray-11)]">
+        <div className="flex items-center justify-center w-full aspect-video gap-2 text-[var(--gray-11)]">
           <LoadingSpinner className="w-6 h-6" /> Loading recording…
         </div>
       )}
       {recState === "empty" && (
-        <div className="flex flex-col items-center justify-center flex-1 gap-2 text-[var(--gray-11)] p-6 text-center">
+        <div className="flex flex-col items-center justify-center w-full aspect-video gap-2 text-[var(--gray-11)] p-6 text-center">
           <p>No video recording for this session.</p>
-          <p className="text-xs max-w-md">
+          <p className="text-xs max-w-md text-[var(--gray-10)]">
             Every scrape records automatically. Re-run a scrape to generate a video.
           </p>
         </div>
       )}
       {recState === "error" && (
-        <div className="flex items-center justify-center flex-1 text-[var(--red-11)] p-6">
+        <div className="flex items-center justify-center w-full aspect-video text-[var(--red-11)] p-6">
           {recError || "Failed to load recording"}
         </div>
       )}
       {recState === "video" && videoUrl && (
-        <div className="flex-1 min-h-0 flex items-center justify-center p-3">
-          {/* Video sits inside a contained card — never stretches to fill the pane. */}
-          <div className="w-full max-w-2xl rounded-md overflow-hidden border border-[var(--gray-6)] bg-black shadow-sm">
+        <>
+          <div className="bg-black">
             <video
               key={videoUrl}
+              ref={videoRef}
               src={videoUrl}
-              controls
-              className="w-full aspect-video max-h-[60vh]"
+              className="w-full aspect-video"
               style={{ background: "#000" }}
+              onClick={togglePlay}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
+              onEnded={() => setPlaying(false)}
+              onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+              onLoadedMetadata={(e) => setVideoDuration(e.currentTarget.duration)}
             />
           </div>
-        </div>
+          {/* Scrubber bar */}
+          <div className="flex items-center gap-3 px-4 py-3 border-t border-[var(--gray-6)] bg-[var(--gray-3)]">
+            <button
+              onClick={togglePlay}
+              className="flex items-center justify-center w-8 h-8 rounded-full text-[var(--gray-12)] hover:bg-[var(--gray-5)] transition-colors"
+              title={playing ? "Pause" : "Play"}
+            >
+              {playing ? (
+                <PauseIcon className="w-4 h-4" />
+              ) : (
+                <PlayIcon className="w-4 h-4" />
+              )}
+            </button>
+            <span className="text-xs font-mono tabular-nums text-[var(--gray-11)] whitespace-nowrap">
+              {formatTime(currentTime)} / {formatTime(videoDuration)}
+            </span>
+            <div
+              className="relative flex-1 h-1.5 rounded-full bg-[var(--gray-5)] cursor-pointer group"
+              onClick={handleSeek}
+            >
+              <div
+                className="absolute left-0 top-0 h-full rounded-full bg-[var(--gray-12)]"
+                style={{ width: `${progress}%` }}
+              />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-[var(--gray-12)] opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ left: `${progress}%` }}
+              />
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

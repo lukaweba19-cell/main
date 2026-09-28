@@ -24,37 +24,44 @@ export default function SessionConsole({ id }: SessionConsoleProps) {
   ];
 
   return (
-    <div className="flex flex-col w-full h-full min-h-0">
-      <div className="flex flex-row items-center bg-[var(--gray-3)] px-2 border-b border-[var(--gray-6)] shrink-0">
-        <Tabs defaultValue="details">
-          <TabsList className="bg-transparent h-10">
+    <div className="flex flex-col w-full">
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
+        <div className="flex flex-row items-center px-3 border-b border-[var(--gray-6)] shrink-0">
+          <TabsList className="bg-transparent h-11 gap-1 p-0 rounded-none">
             {tabs.map((tab) => (
               <TabsTrigger
                 key={tab.value}
                 value={tab.value}
-                onClick={() => setActiveTab(tab.value)}
-                className={`!bg-transparent !shadow-none rounded-none px-3 h-10 text-xs ${
+                className={`!bg-transparent !shadow-none rounded-none px-3 h-11 text-sm transition-colors border-b-2 ${
                   activeTab === tab.value
-                    ? "border-b-2 border-b-[var(--gray-12)] text-[var(--gray-12)]"
-                    : "text-[var(--gray-10)]"
+                    ? "border-b-[var(--gray-12)] text-[var(--gray-12)]"
+                    : "border-b-transparent text-[var(--gray-10)] hover:text-[var(--gray-11)]"
                 }`}
               >
                 {tab.label}
               </TabsTrigger>
             ))}
           </TabsList>
-        </Tabs>
-      </div>
+        </div>
+      </Tabs>
 
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div className="w-full overflow-hidden">
         {activeTab === "details" && <SessionDetails id={id} />}
         {activeTab === "console" && id && (
-          <SessionLogs id={id} filter="console" />
+          <div className="h-[420px] overflow-hidden">
+            <SessionLogs id={id} filter="console" />
+          </div>
         )}
         {activeTab === "network" && id && (
-          <SessionLogs id={id} filter="network" />
+          <div className="h-[420px] overflow-hidden">
+            <SessionLogs id={id} filter="network" />
+          </div>
         )}
-        {activeTab === "dev-tools" && <SessionDevTools />}
+        {activeTab === "dev-tools" && (
+          <div className="h-[560px] overflow-hidden">
+            <SessionDevTools />
+          </div>
+        )}
       </div>
     </div>
   );
