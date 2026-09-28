@@ -573,6 +573,15 @@ export class CDPService extends EventEmitter {
           ...headfulArgs,
           ...dynamicArgs,
           ...engineArgs,
+          // Every extension resolved from the extensions directory loads by
+          // default. (Regression: the Patchright migration dropped these args,
+          // so uploaded extensions silently stopped loading.)
+          ...(extensionPaths.length
+            ? [
+                `--load-extension=${extensionPaths.join(",")}`,
+                `--disable-extensions-except=${extensionPaths.join(",")}`,
+              ]
+            : []),
           ...(options.args || []),
           ...(env.CHROME_ARGS || []),
         ]).filter((arg) => !env.FILTER_CHROME_ARGS.includes(arg));
