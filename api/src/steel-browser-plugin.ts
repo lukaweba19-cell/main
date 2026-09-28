@@ -9,13 +9,11 @@ import customBodyParser from "./plugins/custom-body-parser.js";
 import fileStoragePlugin from "./plugins/file-storage.js";
 import requestLogger from "./plugins/request-logger.js";
 import openAPIPlugin from "./plugins/schemas.js";
-import seleniumPlugin from "./plugins/selenium.js";
 import {
   actionsRoutes,
   cdpRoutes,
   filesRoutes,
   logsRoutes,
-  seleniumRoutes,
   sessionsRoutes,
   extensionsRoutes,
   profilesRoutes,
@@ -71,7 +69,6 @@ const steelBrowserPlugin: FastifyPluginAsync<SteelBrowserConfig> = async (fastif
   await fastify.register(openAPIPlugin);
   await fastify.register(fileStoragePlugin);
   await fastify.register(browserInstancePlugin);
-  await fastify.register(seleniumPlugin);
   await fastify.register(browserWebSocket, {
     customHandlers: opts.customWsHandlers,
   });
@@ -82,7 +79,6 @@ const steelBrowserPlugin: FastifyPluginAsync<SteelBrowserConfig> = async (fastif
   await fastify.register(actionsRoutes, { prefix: "/v1" });
   await fastify.register(sessionsRoutes, { prefix: "/v1" });
   await fastify.register(cdpRoutes, { prefix: "/v1" });
-  await fastify.register(seleniumRoutes);
   await fastify.register(filesRoutes, { prefix: "/v1" });
   await fastify.register(extensionsRoutes, { prefix: "/v1" });
   await fastify.register(profilesRoutes, { prefix: "/v1" });

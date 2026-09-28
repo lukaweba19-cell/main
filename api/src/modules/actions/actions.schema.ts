@@ -13,9 +13,8 @@ const ScrapeRequest = z.object({
     .nullable()
     .optional()
     .describe(
-      "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used.",
+      "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
-  delay: z.number().optional(),
   logUrl: z.string().optional(),
 });
 
@@ -65,9 +64,8 @@ const ScreenshotRequest = z.object({
     .nullable()
     .optional()
     .describe(
-      "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used.",
+      "Proxy URL to use for the screenshot. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
-  delay: z.number().optional(),
   fullPage: z.boolean().optional(),
   logUrl: z.string().optional(),
 });
@@ -81,9 +79,8 @@ const PDFRequest = z.object({
     .nullable()
     .optional()
     .describe(
-      "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used.",
+      "Proxy URL to use for the PDF capture. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
-  delay: z.number().optional(),
   logUrl: z.string().optional(),
 });
 
@@ -94,7 +91,7 @@ const SearchRequest = z.object({
     .nullable()
     .optional()
     .describe(
-      "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used.",
+      "Proxy URL to use for the search. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
   logUrl: z.string().optional(),
 });

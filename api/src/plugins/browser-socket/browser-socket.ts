@@ -16,12 +16,7 @@ const browserWebSocket: FastifyPluginAsync<BrowserSocketOptions> = async (
   fastify: FastifyInstance,
   options: BrowserSocketOptions,
 ) => {
-  if (!fastify.cdpService.isRunning()) {
-    fastify.log.info("Launching browser...");
-    await fastify.cdpService.launch();
-    fastify.log.info("Browser launched successfully");
-  }
-
+  // No idle auto-launch: the browser starts when a session/scrape needs it.
   const registry = new WebSocketRegistryService();
 
   defaultHandlers.forEach((handler) => {

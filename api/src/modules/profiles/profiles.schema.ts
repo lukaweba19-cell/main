@@ -11,10 +11,8 @@ const Profile = z.object({
   status: z.string().describe("Profile status (e.g. READY, UPLOADING)"),
   dimensions: Dimensions.optional(),
   extensionIds: z.array(z.string()).optional(),
-  fingerprint: z.record(z.unknown()).optional(),
   credentialsConfig: z.record(z.unknown()).optional(),
   userDataDir: z.union([z.boolean(), z.string()]).optional(),
-  userAgent: z.string().optional(),
   proxyUrl: z.string().optional(),
   useProxy: z.string().optional(),
   createdAt: z.string().datetime().optional(),
@@ -32,7 +30,6 @@ const ProfileCreateRequest = z.object({
   projectId: z.string().uuid().optional(),
   proxyUrl: z.string().url().optional(),
   useProxy: z.string().optional().describe("JSON-encoded proxy configuration"),
-  userAgent: z.string().optional(),
 });
 
 export type Profile = z.infer<typeof Profile>;

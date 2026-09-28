@@ -1,4 +1,4 @@
-import type { TargetType } from "puppeteer-core";
+import type { TargetType } from "./pw-types.js";
 import type { BrowserEventType } from "../../../types/enums.js";
 
 export interface BaseBrowserEvent {

@@ -1,4 +1,4 @@
-import { Page } from "puppeteer-core";
+import type { Page } from "patchright";
 import { NavigationEvent } from "../types/casting.js";
 import { normalizeUrl } from "./url.js";
 

@@ -1,4 +1,4 @@
-import type { Browser, Page } from "puppeteer-core";
+import type { Browser, Page } from "patchright";
 import type { CDPService } from "../../cdp.service.js";
 import type { BrowserLauncherOptions } from "../../../../types/browser.js";
 

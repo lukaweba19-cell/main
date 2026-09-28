@@ -1,1 +1,5 @@
 node_modules/
+
+# runtime logs
+steel-api.log
+.steel.pid

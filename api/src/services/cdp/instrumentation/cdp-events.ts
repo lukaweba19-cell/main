@@ -1,4 +1,4 @@
-import type { CDPSession } from "puppeteer-core";
+import type { CDPSession } from "patchright";
 import { BrowserEventType } from "../../../types/index.js";
 import { BrowserLogger } from "./browser-logger.js";
 import { BROWSER_INTERACTION_BINDING } from "./browser-interaction-events.js";
@@ -8,7 +8,7 @@ import { BROWSER_INTERACTION_BINDING } from "./browser-interaction-events.js";
  * Logs only protocol commands / notifications so you can diff automation flow between runs.
  */
 export function attachCDPEvents(session: CDPSession, logger: BrowserLogger): void {
-  const sessionId = session.id?.() ?? "unknown";
+  const sessionId = (session as any)._sessionId ?? "unknown";
   const ts = () => new Date().toISOString();
   const originalSend = session.send.bind(session);
   type Method = Parameters<typeof session.send>[0];

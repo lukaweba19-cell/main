@@ -30,13 +30,13 @@ function createProxyServer() {
 function createService({ withProxy = false } = {}) {
   const cdpService = {
     getUserAgent: () => "test-agent",
+    getLiveUserAgent: async () => "test-agent",
     getDimensions: () => ({ width: 1920, height: 1080 }),
     endSession: vi.fn().mockResolvedValue(undefined),
+    startNewSession: vi.fn().mockResolvedValue(undefined),
   };
   const service = new SessionService({
     cdpService: cdpService as never,
-    seleniumService: { close: vi.fn() } as never,
-    fileService: {} as never,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
   });
 

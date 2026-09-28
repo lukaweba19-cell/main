@@ -71,29 +71,22 @@ describe("isSimilarConfig", () => {
   });
 
   describe("existing fields are unaffected", () => {
-    it("headless mismatch is not similar", async () => {
-      const headless: BrowserLauncherOptions = { options: { headless: true } };
-      const headful: BrowserLauncherOptions = { options: { headless: false } };
-      expect(await isSimilarConfig(headless, headful)).toBe(false);
-    });
-
     it("proxy mismatch is not similar", async () => {
       const a: BrowserLauncherOptions = { options: { proxyUrl: "http://proxy-a:3128" } };
       const b: BrowserLauncherOptions = { options: { proxyUrl: "http://proxy-b:3128" } };
       expect(await isSimilarConfig(a, b)).toBe(false);
     });
 
-    it("userAgent mismatch is not similar", async () => {
-      const a: BrowserLauncherOptions = { ...base, userAgent: "Mozilla/5.0 (agent-a)" };
-      const b: BrowserLauncherOptions = { ...base, userAgent: "Mozilla/5.0 (agent-b)" };
+    it("extension mismatch is not similar", async () => {
+      const a: BrowserLauncherOptions = { options: {}, extensions: ["nopecha"] };
+      const b: BrowserLauncherOptions = { options: {}, extensions: ["recorder"] };
       expect(await isSimilarConfig(a, b)).toBe(false);
     });
 
     it("matching full config with caCertificates is similar", async () => {
       const certA = "-----BEGIN CERTIFICATE-----\nMIIBcert-a\n-----END CERTIFICATE-----";
       const config: BrowserLauncherOptions = {
-        options: { headless: true, proxyUrl: "http://proxy:3128" },
-        userAgent: "Mozilla/5.0",
+        options: { proxyUrl: "http://proxy:3128" },
         blockAds: true,
         caCertificates: [certA],
       };

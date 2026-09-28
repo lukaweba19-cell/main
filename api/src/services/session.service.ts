@@ -2,14 +2,11 @@ import { flushRecording } from "../utils/recording-store.js";
 import { FastifyBaseLogger } from "fastify";
 import { mkdir } from "fs/promises";
 import os from "os";
-import path, { dirname } from "path";
-import { fileURLToPath } from "url";
+import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { env } from "../env.js";
-import { BrowserFingerprintWithHeaders } from "fingerprint-generator";
 import { CredentialsOptions, SessionDetails } from "../modules/sessions/sessions.schema.js";
 import {
-  BrowserLaunchExtra,
   BrowserLauncherOptions,
   OptimizeBandwidthOptions,
 } from "../types/index.js";
@@ -18,9 +15,6 @@ import { getBaseUrl, getUrl } from "../utils/url.js";
 import { CDPService } from "./cdp/cdp.service.js";
 import { ShutdownReason } from "./cdp/plugins/core/base-plugin.js";
 import { CookieData } from "./context/types.js";
-import { FileService } from "./file.service.js";
-import { SeleniumService } from "./selenium.service.js";
-import { TimezoneFetcher } from "./timezone-fetcher.service.js";
 import { deepMerge } from "../utils/context.js";
 
 type Session = SessionDetails & {
@@ -46,9 +40,7 @@ const defaultSession = {
   sessionViewerUrl: getBaseUrl(),
   dimensions: { width: 1920, height: 1080 },
   userAgent: "",
-  isSelenium: false,
   proxy: "",
-  solveCaptcha: false,
 };
 
 export type ProxyFactory = (
@@ -59,32 +51,19 @@ export type ProxyFactory = (
 export class SessionService {
   private logger: FastifyBaseLogger;
   private cdpService: CDPService;
-  private seleniumService: SeleniumService;
-  private fileService: FileService;
-  private timezoneFetcher: TimezoneFetcher;
   public proxyFactory: ProxyFactory = (proxyUrl) => new ProxyServer(proxyUrl);
 
   public pastSessions: Session[] = [];
   public activeSession: Session;
 
-  constructor(config: {
-    cdpService: CDPService;
-    seleniumService: SeleniumService;
-    fileService: FileService;
-    logger: FastifyBaseLogger;
-  }) {
+  constructor(config: { cdpService: CDPService; logger: FastifyBaseLogger }) {
     this.cdpService = config.cdpService;
-    this.seleniumService = config.seleniumService;
-    this.fileService = config.fileService;
     this.logger = config.logger;
-    this.timezoneFetcher = new TimezoneFetcher(config.logger);
     this.activeSession = {
       id: uuidv4(),
       createdAt: new Date().toISOString(),
       ...defaultSession,
       ...sessionStats,
-      userAgent: this.cdpService.getUserAgent() ?? "",
-      dimensions: this.cdpService.getDimensions(),
       completion: Promise.resolve(),
       complete: () => {},
       proxyServer: undefined,
@@ -94,28 +73,23 @@ export class SessionService {
   public async startSession(options: {
     sessionId?: string;
     proxyUrl?: string;
-    userAgent?: string;
     sessionContext?: {
       cookies?: CookieData[];
       localStorage?: Record<string, Record<string, any>>;
     };
-    isSelenium?: boolean;
-    fingerprint?: BrowserFingerprintWithHeaders;
+    sessionExtensions?: string[];
     logSinkUrl?: string;
     userDataDir?: string;
     persist?: boolean;
     blockAds?: boolean;
     optimizeBandwidth?: boolean | OptimizeBandwidthOptions;
-    extensions?: string[];
     timezone?: string;
     dimensions?: { width: number; height: number };
-    extra?: BrowserLaunchExtra;
-    credentials: CredentialsOptions;
-    skipFingerprintInjection?: boolean;
+    extra?: Record<string, unknown>;
+    credentials?: CredentialsOptions;
     userPreferences?: Record<string, any>;
     deviceConfig?: { device: "desktop" | "mobile" };
     fullscreen?: boolean;
-    headless?: boolean;
     dangerouslyLogRequestDetails?: boolean;
     captureWorkerNetwork?: boolean;
     caCertificates?: string[];
@@ -123,39 +97,36 @@ export class SessionService {
     const {
       sessionId,
       proxyUrl,
-      userAgent,
       sessionContext,
-      extensions,
+      sessionExtensions,
       logSinkUrl,
       dimensions,
-      fingerprint,
-      isSelenium,
       blockAds,
       optimizeBandwidth,
       extra,
       credentials,
-      skipFingerprintInjection,
       userPreferences,
       deviceConfig,
       fullscreen,
-      headless,
       dangerouslyLogRequestDetails,
       captureWorkerNetwork,
       caCertificates,
     } = options;
 
-    // start fetching timezone as early as possible
+    // Resolve timezone early so the browser launches with the right clock.
     let timezonePromise: Promise<string>;
     if (options.timezone) {
       timezonePromise = Promise.resolve(options.timezone);
     } else {
-      timezonePromise = this.timezoneFetcher.getTimezone(
+      const tzFetcher = new (await import("./timezone-fetcher.service.js")).TimezoneFetcher(
+        this.logger,
+      );
+      timezonePromise = tzFetcher.getTimezone(
         proxyUrl,
         env.DEFAULT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone,
       );
     }
 
-    // If dimensions not provided, get from CDP service
     const MIN_MOBILE_WIDTH = 508;
     const MIN_MOBILE_HEIGHT = 1074;
     const isMobileDevice = deviceConfig?.device === "mobile";
@@ -172,15 +143,13 @@ export class SessionService {
       id: sessionId || uuidv4(),
       status: "live",
       proxy: proxyUrl,
-      solveCaptcha: false,
       dimensions: finalDimensions,
-      isSelenium: isSelenium ?? false,
       deviceConfig,
     });
 
     const userDataDir =
       options.userDataDir || options.persist === true
-        ? path.join(dirname(fileURLToPath(import.meta.url)), "..", "..", "user-data-dir")
+        ? path.join(process.cwd(), "user-data-dir")
         : env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome");
     await mkdir(userDataDir, { recursive: true });
 
@@ -217,23 +186,18 @@ export class SessionService {
 
     const browserLauncherOptions: BrowserLauncherOptions = {
       options: {
-        headless: headless ?? env.CHROME_HEADLESS,
         proxyUrl: this.activeSession.proxyServer?.url,
       },
       sessionContext,
-      userAgent,
       blockAds,
-      fingerprint,
       optimizeBandwidth: normalizedOptimize,
-      extensions: extensions || [],
-      logSinkUrl,
+      extensions: sessionExtensions,
       timezone: timezonePromise,
       dimensions: finalDimensions,
       userDataDir,
       userPreferences: mergedUserPreferences,
       extra,
       credentials,
-      skipFingerprintInjection,
       deviceConfig,
       fullscreen,
       dangerouslyLogRequestDetails,
@@ -241,37 +205,19 @@ export class SessionService {
       caCertificates,
     };
 
-    if (isSelenium) {
-      await this.cdpService.shutdown(ShutdownReason.MODE_SWITCH);
-      await this.seleniumService.launch(browserLauncherOptions);
+    await this.cdpService.startNewSession(browserLauncherOptions);
 
-      Object.assign(this.activeSession, {
-        websocketUrl: "",
-        debugUrl: "",
-        sessionViewerUrl: "",
-        userAgent:
-          userAgent ||
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        dimensions: this.cdpService.getDimensions(),
-        deviceConfig,
-      });
-
-      return this.activeSession;
-    } else {
-      await this.cdpService.startNewSession(browserLauncherOptions);
-
-      Object.assign(this.activeSession, {
-        websocketUrl: getBaseUrl("ws"),
-        debugUrl: getUrl("v1/sessions/debug"),
-        debuggerUrl: getUrl("v1/devtools/inspector.html"),
-        sessionViewerUrl: getBaseUrl(),
-        userAgent:
-          this.cdpService.getUserAgent() ||
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        dimensions: this.cdpService.getDimensions(),
-        deviceConfig,
-      });
-    }
+    // The browser reports its own real user agent; surface it in session details.
+    const userAgent = (await this.cdpService.getLiveUserAgent()) || "";
+    Object.assign(this.activeSession, {
+      websocketUrl: getBaseUrl("ws"),
+      debugUrl: getUrl("v1/sessions/debug"),
+      debuggerUrl: getUrl("v1/devtools/inspector.html"),
+      sessionViewerUrl: getBaseUrl(),
+      userAgent,
+      dimensions: this.cdpService.getDimensions(),
+      deviceConfig,
+    });
 
     return this.activeSession;
   }
@@ -285,12 +231,7 @@ export class SessionService {
     this.activeSession.duration =
       new Date().getTime() - new Date(this.activeSession.createdAt).getTime();
 
-    if (this.activeSession.isSelenium) {
-      this.seleniumService.close();
-      await this.cdpService.launch();
-    } else {
-      await this.cdpService.endSession(undefined, { relaunchIdle: options?.relaunchIdle });
-    }
+    await this.cdpService.endSession(undefined, { relaunchIdle: options?.relaunchIdle });
 
     const releasedSession = this.activeSession;
     // resetSessionInfo closes the proxy and clears the field, so hold the
@@ -327,7 +268,6 @@ export class SessionService {
       ...defaultSession,
       ...overrides,
       ...sessionStats,
-      userAgent: this.cdpService.getUserAgent() ?? "",
       createdAt: new Date().toISOString(),
       completion: promise,
       complete: resolve,

@@ -33,13 +33,13 @@
           "pdf": {
             "type": "boolean"
           },
+          "removeBase64Images": {
+            "type": "boolean"
+          },
           "proxyUrl": {
             "type": "string",
             "nullable": true,
-            "description": "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used."
-          },
-          "delay": {
-            "type": "number"
+            "description": "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, the host's own IP is used."
           },
           "logUrl": {
             "type": "string"
@@ -111,6 +111,9 @@
                 "type": "string"
               },
               "jsonLd": {},
+              "wordCount": {
+                "type": "number"
+              },
               "statusCode": {
                 "type": "integer"
               }
@@ -163,10 +166,7 @@
           "proxyUrl": {
             "type": "string",
             "nullable": true,
-            "description": "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used."
-          },
-          "delay": {
-            "type": "number"
+            "description": "Proxy URL to use for the screenshot. Provide `null` to disable proxy. If not provided, the host's own IP is used."
           },
           "fullPage": {
             "type": "boolean"
@@ -190,10 +190,7 @@
           "proxyUrl": {
             "type": "string",
             "nullable": true,
-            "description": "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used."
-          },
-          "delay": {
-            "type": "number"
+            "description": "Proxy URL to use for the PDF capture. Provide `null` to disable proxy. If not provided, the host's own IP is used."
           },
           "logUrl": {
             "type": "string"
@@ -203,6 +200,60 @@
       },
       "PDFResponse": {
         "title": "PDFResponse"
+      },
+      "SearchRequest": {
+        "title": "SearchRequest",
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "proxyUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Proxy URL to use for the search. Provide `null` to disable proxy. If not provided, the host's own IP is used."
+          },
+          "logUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "SearchResponse": {
+        "title": "SearchResponse",
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "title",
+                "url"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "additionalProperties": false
       },
       "CreateSession": {
         "title": "CreateSession",
@@ -215,11 +266,7 @@
           },
           "proxyUrl": {
             "type": "string",
-            "description": "Proxy URL to use for the session"
-          },
-          "userAgent": {
-            "type": "string",
-            "description": "User agent string to use for the session"
+            "description": "Proxy URL to use for the session. If not provided, the browser uses the host's own IP."
           },
           "sessionContext": {
             "type": "object",
@@ -444,10 +491,6 @@
             "additionalProperties": false,
             "description": "Session context data to be used in the created session"
           },
-          "isSelenium": {
-            "type": "boolean",
-            "description": "Indicates if Selenium is used in the session"
-          },
           "blockAds": {
             "type": "boolean",
             "description": "Flag to indicate if ads should be blocked in the session"
@@ -487,10 +530,6 @@
             ],
             "description": "Enable bandwidth optimizations. Passing true enables all flags (except hosts/patterns). Object allows granular control."
           },
-          "skipFingerprintInjection": {
-            "type": "boolean",
-            "description": "Flag to indicate if fingerprint injection should be skipped for this session."
-          },
           "deviceConfig": {
             "type": "object",
             "properties": {
@@ -504,18 +543,22 @@
               }
             },
             "additionalProperties": false,
-            "description": "Device configuration for the session. Specify 'mobile' for mobile device fingerprints and configurations."
+            "description": "Device configuration for the session"
+          },
+          "fullscreen": {
+            "type": "boolean",
+            "description": "Launch the browser in fullscreen mode, covering the full screen with no Chrome UI."
           },
           "logSinkUrl": {
             "type": "string",
             "description": "Deprecated: Log sink URL to use for the session"
           },
-          "extensions": {
+          "sessionExtensions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Extensions to use for the session"
+            "description": "Additional named extensions to load. Every extension in the extensions directory is loaded automatically — this only adds more."
           },
           "persist": {
             "type": "boolean",
@@ -593,9 +636,20 @@
             "additionalProperties": false,
             "description": "Configuration for session credentials"
           },
-          "headless": {
+          "dangerouslyLogRequestDetails": {
             "type": "boolean",
-            "description": "Headless mode for the session"
+            "description": "Log full request/response details for this session"
+          },
+          "captureWorkerNetwork": {
+            "type": "boolean",
+            "description": "Capture network events from dedicated workers"
+          },
+          "caCertificates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CA certificates for the session"
           }
         },
         "additionalProperties": false
@@ -675,7 +729,7 @@
           },
           "userAgent": {
             "type": "string",
-            "description": "User agent string used in the session"
+            "description": "User agent reported by the browser"
           },
           "proxy": {
             "type": "string",
@@ -691,13 +745,20 @@
             "minimum": 0,
             "description": "Amount of data received through the proxy"
           },
-          "solveCaptcha": {
-            "type": "boolean",
-            "description": "Indicates if captcha solving is enabled"
-          },
-          "isSelenium": {
-            "type": "boolean",
-            "description": "Indicates if Selenium is used in the session"
+          "deviceConfig": {
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "default": "desktop"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Device configuration for the session"
           }
         },
         "required": [
@@ -797,7 +858,7 @@
                 },
                 "userAgent": {
                   "type": "string",
-                  "description": "User agent string used in the session"
+                  "description": "User agent reported by the browser"
                 },
                 "proxy": {
                   "type": "string",
@@ -813,13 +874,20 @@
                   "minimum": 0,
                   "description": "Amount of data received through the proxy"
                 },
-                "solveCaptcha": {
-                  "type": "boolean",
-                  "description": "Indicates if captcha solving is enabled"
-                },
-                "isSelenium": {
-                  "type": "boolean",
-                  "description": "Indicates if Selenium is used in the session"
+                "deviceConfig": {
+                  "type": "object",
+                  "properties": {
+                    "device": {
+                      "type": "string",
+                      "enum": [
+                        "desktop",
+                        "mobile"
+                      ],
+                      "default": "desktop"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Device configuration for the session"
                 }
               },
               "required": [
@@ -1158,7 +1226,7 @@
           },
           "userAgent": {
             "type": "string",
-            "description": "User agent string used in the session"
+            "description": "User agent reported by the browser"
           },
           "proxy": {
             "type": "string",
@@ -1174,13 +1242,20 @@
             "minimum": 0,
             "description": "Amount of data received through the proxy"
           },
-          "solveCaptcha": {
-            "type": "boolean",
-            "description": "Indicates if captcha solving is enabled"
-          },
-          "isSelenium": {
-            "type": "boolean",
-            "description": "Indicates if Selenium is used in the session"
+          "deviceConfig": {
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "default": "desktop"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Device configuration for the session"
           },
           "success": {
             "type": "boolean",
@@ -1482,121 +1557,6 @@
         },
         "additionalProperties": false
       },
-      "LaunchRequest": {
-        "title": "LaunchRequest",
-        "type": "object",
-        "properties": {
-          "options": {
-            "type": "object",
-            "properties": {
-              "args": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "chromiumSandbox": {
-                "type": "boolean"
-              },
-              "devtools": {
-                "type": "boolean"
-              },
-              "downloadsPath": {
-                "type": "string"
-              },
-              "headless": {
-                "type": "boolean"
-              },
-              "ignoreDefaultArgs": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                ]
-              },
-              "proxyUrl": {
-                "type": "string"
-              },
-              "timeout": {
-                "type": "number"
-              },
-              "tracesDir": {
-                "type": "string"
-              }
-            },
-            "additionalProperties": false
-          },
-          "req": {},
-          "stealth": {
-            "type": "boolean"
-          },
-          "cookies": {
-            "type": "array"
-          },
-          "userAgent": {
-            "type": "string"
-          },
-          "extensions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "logSinkUrl": {
-            "type": "string",
-            "description": "Deprecated"
-          },
-          "customHeaders": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "timezone": {
-            "type": "string"
-          },
-          "dimensions": {
-            "type": "object",
-            "properties": {
-              "width": {
-                "type": "number"
-              },
-              "height": {
-                "type": "number"
-              }
-            },
-            "required": [
-              "width",
-              "height"
-            ],
-            "additionalProperties": false,
-            "nullable": true
-          }
-        },
-        "required": [
-          "options"
-        ],
-        "additionalProperties": false
-      },
-      "LaunchResponse": {
-        "title": "LaunchResponse",
-        "type": "object",
-        "properties": {
-          "success": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success"
-        ],
-        "additionalProperties": false
-      },
       "FileUploadRequest": {
         "title": "FileUploadRequest",
         "type": "object",
@@ -1672,6 +1632,355 @@
         "required": [
           "data"
         ],
+        "additionalProperties": false
+      },
+      "Extension": {
+        "title": "Extension",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for the extension"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the extension"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp when the extension was created"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp when the extension was last updated"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "createdAt",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "MultipleExtensions": {
+        "title": "MultipleExtensions",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "number",
+            "description": "Total number of extensions"
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Unique identifier for the extension"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Name of the extension"
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Timestamp when the extension was created"
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Timestamp when the extension was last updated"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "createdAt",
+                "updatedAt"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Array of extension objects"
+          }
+        },
+        "required": [
+          "count",
+          "extensions"
+        ],
+        "additionalProperties": false
+      },
+      "ExtensionMessage": {
+        "title": "ExtensionMessage",
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Status message"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "ExtensionUploadRequest": {
+        "title": "ExtensionUploadRequest",
+        "type": "object",
+        "properties": {
+          "file": {
+            "description": "Chrome extension .zip or .crx file (binary)"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Chrome Web Store URL or direct download URL"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Dimensions": {
+        "title": "Dimensions",
+        "type": "object",
+        "properties": {
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Viewport width"
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Viewport height"
+          }
+        },
+        "required": [
+          "width",
+          "height"
+        ],
+        "additionalProperties": false
+      },
+      "Profile": {
+        "title": "Profile",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique profile ID"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Associated project ID"
+          },
+          "status": {
+            "type": "string",
+            "description": "Profile status (e.g. READY, UPLOADING)"
+          },
+          "dimensions": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Viewport width"
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Viewport height"
+              }
+            },
+            "required": [
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          },
+          "extensionIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fingerprint": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "credentialsConfig": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "userDataDir": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "userAgent": {
+            "type": "string"
+          },
+          "proxyUrl": {
+            "type": "string"
+          },
+          "useProxy": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "MultipleProfiles": {
+        "title": "MultipleProfiles",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "number"
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Unique profile ID"
+                },
+                "projectId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Associated project ID"
+                },
+                "status": {
+                  "type": "string",
+                  "description": "Profile status (e.g. READY, UPLOADING)"
+                },
+                "dimensions": {
+                  "type": "object",
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Viewport width"
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Viewport height"
+                    }
+                  },
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "additionalProperties": false
+                },
+                "extensionIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fingerprint": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "credentialsConfig": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "userDataDir": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "userAgent": {
+                  "type": "string"
+                },
+                "proxyUrl": {
+                  "type": "string"
+                },
+                "useProxy": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "id",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "count",
+          "profiles"
+        ],
+        "additionalProperties": false
+      },
+      "ProfileCreateRequest": {
+        "title": "ProfileCreateRequest",
+        "type": "object",
+        "properties": {
+          "userDataDir": {
+            "description": "User data directory zip (binary, required)"
+          },
+          "dimensions": {
+            "type": "string",
+            "description": "JSON string of {height, width}"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "proxyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "useProxy": {
+            "type": "string",
+            "description": "JSON-encoded proxy configuration"
+          },
+          "userAgent": {
+            "type": "string"
+          }
+        },
         "additionalProperties": false
       }
     }
@@ -1763,6 +2072,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PDFResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Use a search engine to search for URLs given a query",
+        "tags": [
+          "Browser Actions"
+        ],
+        "description": "Use a search engine to search for URLs given a query",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
                 }
               }
             }
@@ -2086,6 +2426,56 @@
         }
       }
     },
+    "/v1/sessions/{sessionId}/recording": {
+      "get": {
+        "operationId": "get_session_recording",
+        "summary": "Get session DOM recording",
+        "tags": [
+          "Sessions"
+        ],
+        "description": "Get DOM recording (rrweb events) for a session",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "sessionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/recording/video": {
+      "get": {
+        "operationId": "get_session_recording_video",
+        "summary": "Get session recording video",
+        "tags": [
+          "Sessions"
+        ],
+        "description": "Stream session recording video (mp4)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "sessionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/v1/sessions/scrape": {
       "post": {
         "operationId": "scrape_session",
@@ -2383,6 +2773,327 @@
         "responses": {
           "200": {
             "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/v1/extensions": {
+      "get": {
+        "operationId": "list_extensions",
+        "summary": "List all extensions",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "List all extensions for the organization/instance",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultipleExtensions"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_all_extensions",
+        "summary": "Delete all extensions",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "Delete all extensions for the organization/instance",
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtensionMessage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "upload_extension",
+        "summary": "Upload a Chrome extension",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "Upload a Chrome extension (.zip/.crx file or Chrome Web Store URL)",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtensionUploadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Extension"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/extensions/{extensionId}": {
+      "get": {
+        "operationId": "download_extension",
+        "summary": "Download an extension",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "Download an extension file by extension ID",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "extensionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_extension",
+        "summary": "Delete an extension",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "Delete an extension by ID",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "extensionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtensionMessage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "update_extension",
+        "summary": "Update a Chrome extension",
+        "tags": [
+          "Extensions"
+        ],
+        "description": "Update a Chrome extension (.zip/.crx file or Chrome Web Store URL)",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtensionUploadRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "extensionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Extension"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/profiles": {
+      "get": {
+        "operationId": "list_profiles",
+        "summary": "List all profiles",
+        "tags": [
+          "Profiles"
+        ],
+        "description": "Retrieve a list of all profiles",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "query",
+            "name": "projectId",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultipleProfiles"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_profile",
+        "summary": "Create a new profile",
+        "tags": [
+          "Profiles"
+        ],
+        "description": "Create a new profile with userDataDir and optional settings",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/profiles/{id}": {
+      "get": {
+        "operationId": "get_profile",
+        "summary": "Get a profile by ID",
+        "tags": [
+          "Profiles"
+        ],
+        "description": "Retrieve a profile by ID",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "query",
+            "name": "projectId",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "update_profile",
+        "summary": "Update a profile",
+        "tags": [
+          "Profiles"
+        ],
+        "description": "Update an existing profile",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileCreateRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "query",
+            "name": "projectId",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
           }
         }
       }

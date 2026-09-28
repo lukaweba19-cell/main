@@ -34,9 +34,8 @@ fi
 UI_DIST_PATH="${UI_DIST_PATH:-${ROOT_DIR}/ui/dist}"
 DOMAIN="${DOMAIN:-207.180.29.28:3000}"
 export HOST PORT NODE_ENV CHROME_EXECUTABLE_PATH UI_DIST_PATH DOMAIN
-export CHROME_HEADLESS="${CHROME_HEADLESS:-false}"
+# Browser is always headful on the Xvfb display.
 export DISPLAY="${DISPLAY:-:10}"
-export SKIP_FINGERPRINT_INJECTION="${SKIP_FINGERPRINT_INJECTION:-true}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
@@ -159,9 +158,7 @@ start_server() {
     HOST="${HOST}" \
     PORT="${PORT}" \
     CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH}" \
-    CHROME_HEADLESS="${CHROME_HEADLESS}" \
     DISPLAY="${DISPLAY}" \
-    SKIP_FINGERPRINT_INJECTION="${SKIP_FINGERPRINT_INJECTION}" \
     UI_DIST_PATH="${UI_DIST_PATH}" \
     DOMAIN="${DOMAIN}" \
     node build/index.js >> "${LOG_FILE}" 2>&1 &

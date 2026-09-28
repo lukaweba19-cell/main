@@ -1,4 +1,4 @@
-import { Protocol, Target, TargetType } from "puppeteer-core";
+import type { Protocol, Target, TargetType } from "./pw-types.js";
 import type { BrowserLogger } from "./browser-logger.js";
 import { ExtensionEvent } from "./types.js";
 import { BrowserEventType } from "../../../types/enums.js";

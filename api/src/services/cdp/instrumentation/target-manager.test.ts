@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import type { CDPSession, Target } from "puppeteer-core";
-import { TargetType } from "puppeteer-core";
+import type { CDPSession } from "patchright";
+import { type Target, TargetType } from "./pw-types.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { BrowserEventType } from "../../../types/index.js";

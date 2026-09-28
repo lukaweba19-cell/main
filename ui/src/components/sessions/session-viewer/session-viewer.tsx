@@ -183,7 +183,7 @@ export function SessionViewer({ id }: SessionViewerProps) {
         <div className="flex flex-col items-center justify-center flex-1 gap-2 text-[var(--gray-11)] p-6 text-center">
           <p>No video recording for this session.</p>
           <p className="text-xs max-w-md">
-            New scrapes capture a screencast automatically. Re-run a scrape to generate a video.
+            Every scrape records automatically. Re-run a scrape to generate a video.
           </p>
         </div>
       )}
@@ -193,15 +193,17 @@ export function SessionViewer({ id }: SessionViewerProps) {
         </div>
       )}
       {recState === "video" && videoUrl && (
-        <div className="flex-1 flex items-center justify-center p-2 bg-black">
-          <video
-            key={videoUrl}
-            src={videoUrl}
-            controls
-            autoPlay
-            className="max-w-full max-h-full w-full aspect-video"
-            style={{ background: "#000" }}
-          />
+        <div className="flex-1 min-h-0 flex items-center justify-center p-3">
+          {/* Video sits inside a contained card — never stretches to fill the pane. */}
+          <div className="w-full max-w-2xl rounded-md overflow-hidden border border-[var(--gray-6)] bg-black shadow-sm">
+            <video
+              key={videoUrl}
+              src={videoUrl}
+              controls
+              className="w-full aspect-video max-h-[60vh]"
+              style={{ background: "#000" }}
+            />
+          </div>
         </div>
       )}
     </div>

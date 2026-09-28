@@ -1,11 +1,5 @@
-import type { BrowserEventType } from "./enums.js";
-import type {
-  CookieData,
-  IndexedDBDatabase,
-  LocalStorageData,
-  SessionStorageData,
-} from "../services/context/types.js";
-import { BrowserFingerprintWithHeaders } from "fingerprint-generator";
+import { BrowserEventType } from "./enums.js";
+import type { CookieData, IndexedDBDatabase, LocalStorageData, SessionStorageData } from "../services/context/types.js";
 import type { CredentialsOptions } from "../modules/sessions/sessions.schema.js";
 
 export interface OptimizeBandwidthOptions {
@@ -25,21 +19,26 @@ export interface BrowserLaunchExtra {
   [key: string]: unknown;
 }
 
+/**
+ * Options used to launch (or reuse) the shared headful browser.
+ *
+ * Every launch goes through the same path: patchright Chromium running headful
+ * on the Xvfb display, with every extension in the extensions directory loaded
+ * automatically. There is no headless mode and no fingerprint spoofing — the
+ * browser presents its real configuration.
+ */
 export interface BrowserLauncherOptions {
-  options: BrowserServerOptions;
-  req?: Request;
-  stealth?: boolean;
+  /** Per-context options. `headless` and `userAgent` are intentionally not options. */
+  options: BrowserContextOptions;
   sessionContext?: {
     cookies?: CookieData[];
     localStorage?: Record<string, LocalStorageData>;
     sessionStorage?: Record<string, SessionStorageData>;
     indexedDB?: Record<string, IndexedDBDatabase[]>;
   };
-  userAgent?: string;
+  /** Named extensions from the extensions directory. All directory extensions are loaded anyway; extra names must also exist there. */
   extensions?: string[];
-  logSinkUrl?: string;
   blockAds?: boolean;
-  fingerprint?: BrowserFingerprintWithHeaders;
   optimizeBandwidth?: boolean | OptimizeBandwidthOptions;
   customHeaders?: Record<string, string>;
   timezone?: Promise<string>;
@@ -51,7 +50,6 @@ export interface BrowserLauncherOptions {
   userPreferences?: Record<string, any>;
   extra?: BrowserLaunchExtra;
   credentials?: CredentialsOptions;
-  skipFingerprintInjection?: boolean;
   deviceConfig?: { device: "desktop" | "mobile" };
   fullscreen?: boolean;
   dangerouslyLogRequestDetails?: boolean;
@@ -59,16 +57,10 @@ export interface BrowserLauncherOptions {
   caCertificates?: string[];
 }
 
-export interface BrowserServerOptions {
-  args?: string[];
-  chromiumSandbox?: boolean;
-  devtools?: boolean;
-  downloadsPath?: string;
-  headless?: boolean;
-  ignoreDefaultArgs?: boolean | string[];
+export interface BrowserContextOptions {
+  /** Local proxy server URL (never a hard-coded upstream — users pass their own proxy). */
   proxyUrl?: string;
-  timeout?: number;
-  tracesDir?: string;
+  args?: string[];
 }
 
 export type BrowserEvent = {

@@ -17,10 +17,8 @@ export interface ProfileMeta {
   status: string;
   dimensions?: Dimensions | null;
   extensionIds?: string[];
-  fingerprint?: Record<string, unknown> | null;
   credentialsConfig?: Record<string, unknown> | null;
   userDataDir?: string | null; // path to stored zip
-  userAgent?: string | null;
   proxyUrl?: string | null;
   useProxy?: string | null;
   createdAt: string;
@@ -65,12 +63,10 @@ export class ProfileService {
   private toPublic(p: ProfileMeta) {
     const {
       userDataDir,
-      fingerprint,
       credentialsConfig,
       projectId,
       proxyUrl,
       useProxy,
-      userAgent,
       dimensions,
       ...rest
     } = p;
@@ -79,10 +75,8 @@ export class ProfileService {
       projectId: projectId || undefined,
       dimensions: dimensions || undefined,
       extensionIds: p.extensionIds || [],
-      fingerprint: fingerprint || undefined,
       credentialsConfig: credentialsConfig || undefined,
       userDataDir: userDataDir ? true : undefined,
-      userAgent: userAgent || undefined,
       proxyUrl: proxyUrl || undefined,
       useProxy: useProxy || undefined,
     };
@@ -114,7 +108,6 @@ export class ProfileService {
     projectId?: string;
     proxyUrl?: string;
     useProxy?: string;
-    userAgent?: string;
   }): Promise<ReturnType<ProfileService["toPublic"]>> {
     const id = randomUUID();
     const destDir = path.join(this.basePath, id);
@@ -134,10 +127,8 @@ export class ProfileService {
       status: "READY",
       dimensions: opts.dimensions || undefined,
       extensionIds: [],
-      fingerprint: undefined,
       credentialsConfig: undefined,
       userDataDir: userDataDirPath,
-      userAgent: opts.userAgent || undefined,
       proxyUrl: opts.proxyUrl || undefined,
       useProxy: opts.useProxy || undefined,
       createdAt: now,
@@ -158,7 +149,6 @@ export class ProfileService {
       projectId?: string;
       proxyUrl?: string;
       useProxy?: string;
-      userAgent?: string;
     },
     projectIdFilter?: string,
   ): Promise<ReturnType<ProfileService["toPublic"]>> {
@@ -182,7 +172,6 @@ export class ProfileService {
       projectId: opts.projectId !== undefined ? opts.projectId : existing.projectId,
       proxyUrl: opts.proxyUrl !== undefined ? opts.proxyUrl : existing.proxyUrl,
       useProxy: opts.useProxy !== undefined ? opts.useProxy : existing.useProxy,
-      userAgent: opts.userAgent !== undefined ? opts.userAgent : existing.userAgent,
       userDataDir: userDataDirPath,
       updatedAt: now,
     };

@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { TargetType } from "puppeteer-core";
+import { TargetType } from "./pw-types.js";
 import { describe, expect, it } from "vitest";
 import { BrowserEventType } from "../../../types/enums.js";
 import type { BrowserLogger } from "./browser-logger.js";

@@ -1,8 +1,8 @@
 import { IncomingMessage } from "http";
-import puppeteer, { Browser, CDPSession, Page } from "puppeteer-core";
 import { Duplex } from "stream";
 import WebSocket, { Server } from "ws";
 
+import type { BrowserContext, CDPSession, Page } from "patchright";
 import { env } from "../../env.js";
 import { SessionService } from "../../services/session.service.js";
 import {
@@ -50,8 +50,22 @@ export async function handleCastSession(
   const { height, width } =
     (session.dimensions as { width: number; height: number }) ?? defaultDimensions;
 
+  const resolvePageId = async (page: Page): Promise<string> => {
+    const cached = (page as any).__steelPageId;
+    if (cached) return cached;
+    try {
+      const client = await (page.context() as any).newCDPSession(page);
+      const { targetInfo } = await client.send("Target.getTargetInfo");
+      await client.detach().catch(() => {});
+      (page as any).__steelPageId = targetInfo.targetId;
+      return targetInfo.targetId;
+    } catch {
+      return page.url();
+    }
+  };
+
   wss.handleUpgrade(request, socket, head, async (ws) => {
-    let browser: Browser | null = null;
+    let context: BrowserContext | null = null;
     let targetPage: Page | null = null;
     let targetClient: CDPSession | null = null;
     let targetPageId: string | null = null;
@@ -73,39 +87,24 @@ export async function handleCastSession(
       // Clean up screencast
       if (targetClient) {
         try {
-          targetClient.send("Page.stopScreencast").catch((err) => {
-            // Ignore errors about closed targets
-            if (!err.message?.includes("Target closed")) {
-              console.error("Error stopping screencast:", err);
-            }
-          });
-
-          targetClient.detach().catch((err) => {
-            // Ignore errors about closed targets
-            if (!err.message?.includes("Target closed")) {
-              console.error("Error detaching client:", err);
-            }
-          });
-
+          targetClient.send("Page.stopScreencast").catch(() => {});
+          targetClient.detach().catch(() => {});
           targetClient = null;
         } catch (err) {
           console.error("Error during screencast cleanup:", err);
         }
       }
 
-      // Disconnect browser
-      if (browser) {
+      // Disconnect our own CDP connection (does not close the browser)
+      if (context) {
         try {
-          browser.disconnect().catch((err) => {
-            console.error("Error disconnecting browser:", err);
-          });
-          browser = null;
+          context.close().catch(() => {});
+          context = null;
         } catch (err) {
-          console.error("Error during browser disconnect:", err);
+          console.error("Error during context disconnect:", err);
         }
       }
 
-      // Force garbage collection if available (Node.js with --expose-gc flag)
       if (global.gc) {
         try {
           global.gc();
@@ -125,8 +124,8 @@ export async function handleCastSession(
           tabList.push({
             id: pageId,
             url: page.url(),
-            title: await getPageTitle(page),
-            favicon: await getPageFavicon(page),
+            title: await getPageTitle(page as any),
+            favicon: await getPageFavicon(page as any),
           });
         }
 
@@ -145,27 +144,20 @@ export async function handleCastSession(
     const findTargetPage = async (
       pages: Page[],
     ): Promise<{ page: Page; pageId: string } | null> => {
-      if (tabDiscoveryMode) return null; // No target page in tab discovery mode
+      if (tabDiscoveryMode) return null;
 
       if (requestedPageId) {
         for (const page of pages) {
-          try {
-            //@ts-expect-error
-            const pageId = page.target()._targetId;
-            if (pageId === requestedPageId) {
-              return { page, pageId };
-            }
-          } catch (err) {
-            console.error("Error accessing page target ID:", err);
+          const pageId = await resolvePageId(page);
+          if (pageId === requestedPageId) {
+            return { page, pageId };
           }
         }
       } else if (requestedPageIndex) {
         const index = parseInt(requestedPageIndex, 10);
         if (index >= 0 && index < pages.length) {
           const page = pages[index];
-          //@ts-expect-error
-          const pageId = page.target()._targetId;
-          return { page, pageId };
+          return { page, pageId: await resolvePageId(page) };
         }
       }
 
@@ -173,69 +165,38 @@ export async function handleCastSession(
     };
 
     try {
-      browser = await puppeteer.connect({
-        browserWSEndpoint: `ws://${env.HOST}:${env.PORT}`,
-      });
+      // Attach to the running browser over its CDP websocket (patchright).
+      const { chromium } = await import("patchright");
+      const browser = await chromium.connectOverCDP(
+        `http://127.0.0.1:${env.CDP_REDIRECT_PORT}`,
+      );
+      const contexts = browser.contexts();
+      context = contexts[0] ?? (await browser.newContext());
 
-      if (!browser) {
-        console.error("Failed to connect to browser");
-        socket.destroy();
-        return;
-      }
-
-      const pages = await browser.pages();
+      const pages = await context.pages();
 
       if (tabDiscoveryMode) {
         for (const page of pages) {
-          //@ts-expect-error
-          const pageId = page.target()._targetId;
-          activePages.set(pageId, page);
+          activePages.set(await resolvePageId(page), page);
         }
 
-        // Initial tab list
         await sendTabList();
 
-        // Setup page creation/deletion tracking
-        browser.on("targetcreated", async (target) => {
-          if (target.type() === "page") {
-            try {
-              const page = await target.asPage();
-              //@ts-expect-error
-              const pageId = target._targetId;
-              activePages.set(pageId, page);
-              await sendTabList();
-            } catch (err) {
-              console.error("Error handling new target:", err);
-            }
+        context.on("page", async (page) => {
+          try {
+            activePages.set(await resolvePageId(page), page);
+            await sendTabList();
+          } catch (err) {
+            console.error("Error handling new target:", err);
           }
         });
 
-        browser.on("targetdestroyed", async (target) => {
-          if (target.type() === "page") {
-            try {
-              //@ts-expect-error
-              const pageId = target._targetId;
-              if (activePages.has(pageId)) {
-                activePages.delete(pageId);
-
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "tabClosed",
-                      pageId,
-                    }),
-                  );
-
-                  await sendTabList();
-                }
-              }
-            } catch (err) {
-              console.error("Error handling destroyed target:", err);
-            }
+        context.on("close", async () => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "targetClosed", pageId: null }));
           }
         });
 
-        // Setup heartbeat to detect dead connections
         heartbeatInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             try {
@@ -249,234 +210,190 @@ export async function handleCastSession(
           }
         }, 30000);
 
-        ws.on("close", () => {
-          handleSessionCleanup();
-        });
-
+        ws.on("close", () => handleSessionCleanup());
         ws.on("error", (err) => {
           console.error("Tab discovery WebSocket error:", err);
           handleSessionCleanup();
         });
 
         return;
-      } else {
-        const targetResult = await findTargetPage(pages);
+      }
 
-        if (!targetResult) {
-          console.error(
-            `Target page not found for ${
-              requestedPageId ? `pageId=${requestedPageId}` : `pageIndex=${requestedPageIndex}`
-            }`,
-          );
-          socket.destroy();
-          return;
+      const targetResult = await findTargetPage(pages);
+      if (!targetResult) {
+        console.error(
+          `Target page not found for ${
+            requestedPageId ? `pageId=${requestedPageId}` : `pageIndex=${requestedPageIndex}`
+          }`,
+        );
+        socket.destroy();
+        return;
+      }
+
+      targetPage = targetResult.page;
+      targetPageId = targetResult.pageId;
+
+      await targetPage.bringToFront().catch(() => {});
+
+      targetClient = await context.newCDPSession(targetPage);
+
+      ws.on("message", async (message) => {
+        try {
+          const data:
+            | MouseEvent
+            | KeyEvent
+            | NavigationEvent
+            | CloseTabEvent
+            | GetSelectedTextEvent = JSON.parse(message.toString());
+          const { type } = data;
+
+          if (!targetClient || !targetPage) {
+            console.error("No target page or client available for input handling");
+            return;
+          }
+
+          switch (type) {
+            case "mouseEvent": {
+              const { event } = data as MouseEvent;
+              await targetClient.send("Input.dispatchMouseEvent", {
+                type: event.type,
+                x: event.x,
+                y: event.y,
+                button: event.button,
+                buttons: event.button === "none" ? 0 : 1,
+                clickCount: event.clickCount || 1,
+                modifiers: event.modifiers || 0,
+                deltaX: event.deltaX,
+                deltaY: event.deltaY,
+              });
+              break;
+            }
+            case "keyEvent": {
+              const { event } = data as KeyEvent;
+              await targetClient.send("Input.dispatchKeyEvent", {
+                type: event.type,
+                text: event.text,
+                unmodifiedText: event.text ? event.text.toLowerCase() : undefined,
+                code: event.code,
+                key: event.key,
+                windowsVirtualKeyCode: event.keyCode,
+                nativeVirtualKeyCode: event.keyCode,
+                modifiers: event.modifiers || 0,
+                autoRepeat: false,
+                isKeypad: false,
+                isSystemKey: false,
+              });
+              break;
+            }
+            case "navigation": {
+              const { event } = data as NavigationEvent;
+              await navigatePage(event, targetPage as any);
+              break;
+            }
+            case "closeTab": {
+              await targetPage?.close();
+              if ((data as CloseTabEvent).pageId) {
+                activePages.delete((data as CloseTabEvent).pageId);
+              }
+              break;
+            }
+            case "getSelectedText": {
+              try {
+                const selectedText = await targetPage.evaluate(() => {
+                  const selection = window.getSelection();
+                  return selection ? selection.toString() : "";
+                });
+
+                ws.send(
+                  JSON.stringify({
+                    type: "selectedTextResponse",
+                    pageId: (data as GetSelectedTextEvent).pageId,
+                    text: selectedText,
+                  }),
+                );
+              } catch (error) {
+                console.error("Failed to get selected text:", error);
+                ws.send(
+                  JSON.stringify({
+                    type: "selectedTextResponse",
+                    pageId: (data as GetSelectedTextEvent).pageId,
+                    text: "",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                  }),
+                );
+              }
+              break;
+            }
+
+            default:
+              console.warn("Unknown event type:", type);
+          }
+        } catch (err) {
+          console.error("Error handling WebSocket message:", err);
         }
+      });
 
-        targetPage = targetResult.page;
-        targetPageId = targetResult.pageId;
+      // Setup device metrics and start screencast
+      await targetClient.send("Page.setDeviceMetricsOverride", {
+        screenHeight: height,
+        screenWidth: width,
+        width,
+        height,
+        mobile: isMobile,
+        screenOrientation: isMobile
+          ? { angle: 0, type: "portraitPrimary" }
+          : { angle: 90, type: "landscapePrimary" },
+        deviceScaleFactor: isMobile ? 3 : 1,
+      });
 
-        await targetPage.bringToFront();
+      await targetClient.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: 75,
+        maxWidth: width,
+        maxHeight: height,
+      });
 
-        // Setup screencast for the target page
-        targetClient = await targetPage.target().createCDPSession();
+      targetClient.on("Page.screencastFrame", async ({ data, sessionId }: any) => {
+        try {
+          await targetClient?.send("Page.screencastFrameAck", { sessionId });
 
-        ws.on("message", async (message) => {
-          try {
-            const data:
-              | MouseEvent
-              | KeyEvent
-              | NavigationEvent
-              | CloseTabEvent
-              | GetSelectedTextEvent = JSON.parse(message.toString());
-            const { type } = data;
-
-            if (!targetClient || !targetPage) {
-              console.error("No target page or client available for input handling");
-              return;
-            }
-
-            switch (type) {
-              case "mouseEvent": {
-                const { event } = data as MouseEvent;
-                await targetClient.send("Input.dispatchMouseEvent", {
-                  type: event.type,
-                  x: event.x,
-                  y: event.y,
-                  button: event.button,
-                  buttons: event.button === "none" ? 0 : 1,
-                  clickCount: event.clickCount || 1,
-                  modifiers: event.modifiers || 0,
-                  deltaX: event.deltaX,
-                  deltaY: event.deltaY,
-                });
-                break;
-              }
-              case "keyEvent": {
-                const { event } = data as KeyEvent;
-                await targetClient.send("Input.dispatchKeyEvent", {
-                  type: event.type,
-                  text: event.text,
-                  unmodifiedText: event.text ? event.text.toLowerCase() : undefined,
-                  code: event.code,
-                  key: event.key,
-                  windowsVirtualKeyCode: event.keyCode,
-                  nativeVirtualKeyCode: event.keyCode,
-                  modifiers: event.modifiers || 0,
-                  autoRepeat: false,
-                  isKeypad: false,
-                  isSystemKey: false,
-                });
-                break;
-              }
-              case "navigation": {
-                const { event } = data as NavigationEvent;
-                await navigatePage(event, targetPage);
-                break;
-              }
-              case "closeTab": {
-                const { pageId } = data as CloseTabEvent;
-                await targetPage?.close();
-                if (activePages.has(pageId)) {
-                  activePages.delete(pageId);
-                }
-                break;
-              }
-              case "getSelectedText": {
-                try {
-                  const selectedText = await targetPage.evaluate(() => {
-                    const selection = window.getSelection();
-                    return selection ? selection.toString() : "";
-                  });
-
-                  // Send the selected text back to the client
-                  ws.send(
-                    JSON.stringify({
-                      type: "selectedTextResponse",
-                      pageId: (data as GetSelectedTextEvent).pageId,
-                      text: selectedText,
-                    }),
-                  );
-                } catch (error) {
-                  console.error("Failed to get selected text:", error);
-                  ws.send(
-                    JSON.stringify({
-                      type: "selectedTextResponse",
-                      pageId: (data as GetSelectedTextEvent).pageId,
-                      text: "",
-                      error: error instanceof Error ? error.message : "Unknown error",
-                    }),
-                  );
-                }
-                break;
-              }
-
-              default:
-                console.warn("Unknown event type:", type);
-            }
-          } catch (err) {
-            console.error("Error handling WebSocket message:", err);
-          }
-        });
-
-        // Setup device metrics and start screencast
-        await targetClient.send("Page.setDeviceMetricsOverride", {
-          screenHeight: height,
-          screenWidth: width,
-          width,
-          height,
-          mobile: isMobile,
-          screenOrientation: isMobile
-            ? { angle: 0, type: "portraitPrimary" }
-            : { angle: 90, type: "landscapePrimary" },
-          deviceScaleFactor: isMobile ? 3 : 1,
-        });
-
-        await targetClient.send("Page.startScreencast", {
-          format: "jpeg",
-          quality: 75,
-          maxWidth: width,
-          maxHeight: height,
-        });
-
-        // Handle screencast frames
-        targetClient.on("Page.screencastFrame", async ({ data, sessionId }) => {
-          try {
-            // Acknowledge the frame right away to free up memory
-            await targetClient?.send("Page.screencastFrameAck", { sessionId });
-
-            if (ws.readyState === WebSocket.OPEN) {
-              // Get page metadata
-              const title = await getPageTitle(targetPage!);
-              const favicon = await getPageFavicon(targetPage!);
-
-              // Send frame data
-              ws.send(
-                JSON.stringify({
-                  pageId: targetPageId,
-                  url: targetPage?.url(),
-                  title,
-                  favicon,
-                  data,
-                }),
-              );
-            }
-          } catch (err) {
-            console.error("Error in Page.screencastFrame handler:", err);
-          }
-        });
-
-        // Cleanup when target is destroyed
-        browser.on("targetdestroyed", async (target) => {
-          if (target.type() === "page") {
-            try {
-              //@ts-expect-error
-              const pageId = target._targetId;
-
-              if (pageId === targetPageId) {
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "targetClosed",
-                      pageId: targetPageId,
-                    }),
-                  );
-                }
-
-                // Cleanup and close connection
-                handleSessionCleanup();
-                ws.close();
-              }
-            } catch (err) {
-              console.error("Error handling destroyed target:", err);
-            }
-          }
-        });
-
-        // Setup heartbeat to detect dead connections
-        heartbeatInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
-            try {
-              ws.ping();
-            } catch (err) {
-              console.error("Error sending ping:", err);
-              handleSessionCleanup();
-            }
-          } else {
+            const title = await getPageTitle(targetPage as any);
+            const favicon = await getPageFavicon(targetPage as any);
+
+            ws.send(
+              JSON.stringify({
+                pageId: targetPageId,
+                url: targetPage?.url(),
+                title,
+                favicon,
+                data,
+              }),
+            );
+          }
+        } catch (err) {
+          console.error("Error in Page.screencastFrame handler:", err);
+        }
+      });
+
+      heartbeatInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.ping();
+          } catch (err) {
+            console.error("Error sending ping:", err);
             handleSessionCleanup();
           }
-        }, 30000);
-
-        // Cleanup on WebSocket closure
-        ws.on("close", () => {
+        } else {
           handleSessionCleanup();
-        });
+        }
+      }, 30000);
 
-        // Handle errors
-        ws.on("error", (err) => {
-          console.error("Cast WebSocket error:", err);
-          handleSessionCleanup();
-        });
-      }
+      ws.on("close", () => handleSessionCleanup());
+      ws.on("error", (err) => {
+        console.error("Cast WebSocket error:", err);
+        handleSessionCleanup();
+      });
     } catch (err) {
       console.error("Error in cast session:", err);
       handleSessionCleanup();

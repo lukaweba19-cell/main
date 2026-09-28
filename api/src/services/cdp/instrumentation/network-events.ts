@@ -1,4 +1,5 @@
-import type { CDPSession, Protocol, TargetType } from "puppeteer-core";
+import type { CDPSession } from "patchright";
+import type { Protocol, TargetType } from "./pw-types.js";
 import { BrowserEventType } from "../../../types/index.js";
 import { BrowserLogger } from "./browser-logger.js";
 
@@ -89,7 +90,7 @@ export function attachNetworkEvents(
     requestMeta.delete(event.requestId);
 
     if (!logBodies) return;
-    if (event.encodedDataLength > MAX_BODY_SIZE) return;
+    if ((event.encodedDataLength ?? 0) > MAX_BODY_SIZE) return;
     if (!isTextMime(meta?.mimeType)) return;
 
     session

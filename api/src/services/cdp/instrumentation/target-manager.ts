@@ -1,4 +1,5 @@
-import { type Target, type CDPSession, TargetType } from "puppeteer-core";
+import type { CDPSession } from "patchright";
+import { type Target, TargetType } from "./pw-types.js";
 import type { FastifyBaseLogger } from "fastify";
 
 import { attachPageEvents } from "./page-events.js";

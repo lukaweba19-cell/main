@@ -15,8 +15,10 @@ function ensureRoot() {
 }
 
 /**
- * Full continuous video of the browser via ffmpeg x11grab on Xvfb.
- * Real H.264 MP4 — no page injection.
+ * Full continuous video of the browser via ffmpeg x11grab on the Xvfb display.
+ * Real H.264 MP4 — no page injection. Started automatically for every session;
+ * the file lands in RECORDINGS_DIR and is exposed at
+ * /v1/sessions/:id/recording/video.
  */
 export async function startSessionRecorder(
   _page: unknown,
@@ -29,6 +31,9 @@ export async function startSessionRecorder(
   const metaPath = path.join(ROOT, `${sessionId}.json`);
   try {
     fs.unlinkSync(outFile);
+  } catch {}
+  try {
+    fs.unlinkSync(metaPath);
   } catch {}
 
   let proc: ChildProcess | null = null;
@@ -57,6 +62,8 @@ export async function startSessionRecorder(
         "yuv420p",
         "-crf",
         "28",
+        "-movflags",
+        "+faststart",
         "-an",
         outFile,
       ],
@@ -68,6 +75,14 @@ export async function startSessionRecorder(
   }
 
   const child = proc;
+
+  let stderrTail = "";
+  child.stderr?.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+  });
+  child.on("error", (err) => {
+    console.warn("[recorder] ffmpeg process error", err);
+  });
 
   const stop = async (): Promise<string | null> => {
     if (stopped) return null;
@@ -102,6 +117,9 @@ export async function startSessionRecorder(
     await new Promise((r) => setTimeout(r, 300));
 
     if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 1000) {
+      if (stderrTail) {
+        console.warn(`[recorder] ffmpeg output invalid for ${sessionId}: ${stderrTail}`);
+      }
       try {
         fs.unlinkSync(outFile);
       } catch {}

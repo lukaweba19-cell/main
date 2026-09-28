@@ -1,4 +1,4 @@
-import { Page } from "puppeteer-core";
+import type { Page, Frame } from "patchright";
 import {
   SessionData,
   IndexedDBDatabase,
@@ -54,11 +54,11 @@ export async function extractStorageForPageWithTimeout(
     if (timer) clearTimeout(timer);
   }
 }
+
 /**
- * Extract storage data for a single origin
- * @param client CDP session
- * @param origin Origin to process
- * @returns Storage data for the origin
+ * Extract storage data for a single page
+ * @param page patchright page
+ * @returns Storage data for the page
  */
 export async function extractStorageForPage(
   page: Page,
@@ -81,7 +81,7 @@ export async function extractStorageForPage(
     const origin = new URL(url).origin;
     const domain = new URL(url).hostname;
 
-    const client = await page.target().createCDPSession();
+    const client = await (page.context() as any).newCDPSession(page);
 
     try {
       // Check if the page has a valid main frame
@@ -138,38 +138,31 @@ export async function extractStorageForPage(
         if (databaseNames.length) {
           result.indexedDB![domain] = [];
 
-          // Process each database
           for (let dbIndex = 0; dbIndex < databaseNames.length; dbIndex++) {
             const dbName = databaseNames[dbIndex];
 
-            // Create a properly structured database object
             const database: IndexedDBDatabase = {
               id: dbIndex,
               name: dbName,
               data: [],
             };
 
-            // Get database schema
             const dbSchemaResponse = await client.send("IndexedDB.requestDatabase", {
               securityOrigin: origin,
               databaseName: dbName,
             });
 
-            // Access object stores safely
             const objectStores = dbSchemaResponse?.databaseWithObjectStores?.objectStores || [];
 
-            // Process each object store
             for (let storeIndex = 0; storeIndex < objectStores.length; storeIndex++) {
               const store = objectStores[storeIndex];
 
-              // Create a properly structured object store
               const objectStore: IndexedDBObjectStore = {
                 id: storeIndex,
                 name: store.name,
                 records: [],
               };
 
-              // Paginate through all records
               let hasMoreData = true;
               let skipCount = 0;
               const pageSize = 1000;
@@ -184,20 +177,16 @@ export async function extractStorageForPage(
                   pageSize,
                 });
 
-                // Add the retrieved data
                 const objectStoreData = dataResponse?.objectStoreDataEntries || [];
                 if (objectStoreData.length) {
-                  // Map the data to the correct record format
                   const records: IndexedDBRecord[] = objectStoreData.map((entry) => ({
                     key: entry.key,
                     value: entry.value,
-                    // TODO: Add blob files
                   }));
 
                   objectStore.records.push(...records);
                 }
 
-                // Check if we need to continue pagination
                 hasMoreData = !!dataResponse?.hasMore;
                 skipCount += objectStoreData.length;
 
@@ -205,11 +194,9 @@ export async function extractStorageForPage(
                 if (objectStoreData.length === 0) break;
               }
 
-              // Add the object store to the database
               database.data.push(objectStore);
             }
 
-            // Add the database to the result
             result.indexedDB![domain].push(database);
           }
         }
@@ -230,7 +217,7 @@ export async function extractStorageForPage(
 
 // Create our frameNavigated handler
 export const handleFrameNavigated = async (
-  frame: any,
+  frame: Frame,
   storageByOrigin: Map<
     string,
     {
@@ -248,18 +235,15 @@ export const handleFrameNavigated = async (
     const url = frame.url();
     if (!url || !url.startsWith("http")) return;
 
-    // Extract the origin from the URL
     const origin = new URL(url).origin;
 
-    // Check if we have storage for this origin
     const storage = storageByOrigin.get(origin);
     if (!storage) return;
 
     logger.debug(`[CDPService] Injecting storage for navigated origin: ${origin}`);
 
-    // Set localStorage if available
     if (storage.localStorage) {
-      await frame.evaluate((items) => {
+      await frame.evaluate((items: LocalStorageData) => {
         for (const [key, value] of Object.entries(items)) {
           try {
             if (typeof value === "string") {
@@ -272,9 +256,8 @@ export const handleFrameNavigated = async (
       }, storage.localStorage);
     }
 
-    // Set sessionStorage if available
     if (storage.sessionStorage) {
-      await frame.evaluate((items) => {
+      await frame.evaluate((items: SessionStorageData) => {
         for (const [key, value] of Object.entries(items)) {
           try {
             if (typeof value === "string") {
@@ -287,27 +270,22 @@ export const handleFrameNavigated = async (
       }, storage.sessionStorage);
     }
 
-    // Set IndexedDB if available
     if (storage.indexedDB && storage.indexedDB.length > 0) {
       for (const database of storage.indexedDB) {
         if (!database.name || !database.data) continue;
 
-        // Create a store map for this database
-        const storeMap = {};
+        const storeMap: Record<string, any[]> = {};
 
         for (const store of database.data) {
           if (!store.name || !store.records || store.records.length === 0) continue;
 
           storeMap[store.name] = store.records.map((record) => {
             try {
-              // Parse the key and value if they're stored as strings
-              const parsedKey =
-                typeof record.key === "string" ? JSON.parse(record.key) : record.key;
+              const parsedKey = typeof record.key === "string" ? JSON.parse(record.key) : record.key;
               const parsedValue =
                 typeof record.value === "string" ? JSON.parse(record.value) : record.value;
               return { key: parsedKey, value: parsedValue };
             } catch (e) {
-              // Fall back to original values if parsing fails
               return { key: record.key, value: record.value };
             }
           });
@@ -316,7 +294,8 @@ export const handleFrameNavigated = async (
         if (Object.keys(storeMap).length === 0) continue;
 
         await frame.evaluate(
-          async (dbName, stores) => {
+          // @ts-expect-error patchright's evaluate overloads only accept one arg on this signature
+          async (dbName: string, stores: Record<string, any[]>) => {
             return new Promise((resolve, reject) => {
               try {
                 const openRequest = indexedDB.open(dbName, 1);
@@ -324,7 +303,6 @@ export const handleFrameNavigated = async (
                 openRequest.onupgradeneeded = function (event) {
                   const db = (event.target as IDBOpenDBRequest).result;
 
-                  // Create object stores from our data
                   for (const storeName of Object.keys(stores)) {
                     if (!db.objectStoreNames.contains(storeName)) {
                       db.createObjectStore(storeName, { keyPath: "key" });
@@ -339,7 +317,6 @@ export const handleFrameNavigated = async (
 
                   for (const [storeName, storeData] of Object.entries(stores)) {
                     if (!db.objectStoreNames.contains(storeName)) {
-                      // Skip if object store doesn't exist and can't be created
                       completedStores++;
                       continue;
                     }
@@ -347,7 +324,6 @@ export const handleFrameNavigated = async (
                     const transaction = db.transaction(storeName, "readwrite");
                     const objectStore = transaction.objectStore(storeName);
 
-                    // Add all items
                     for (const item of storeData as any[]) {
                       try {
                         objectStore.put(item);
@@ -362,7 +338,6 @@ export const handleFrameNavigated = async (
                         resolve(true);
                       }
                     };
-
                     transaction.onerror = function (err) {
                       console.error(`Transaction error: ${err}`);
                       completedStores++;
@@ -372,7 +347,6 @@ export const handleFrameNavigated = async (
                     };
                   }
 
-                  // Handle case with no stores
                   if (totalStores === 0) {
                     resolve(true);
                   }
@@ -461,16 +435,12 @@ export function getProfilePath(userDataDir: string, ...pathSegments: string[]): 
   // Both "Default" and "Profile 1" are standard locations
   const possibleProfileDirs = ["Default", "Profile 1"];
 
-  // First check if the userDataDir already includes a profile directory
   const dirName = path.basename(userDataDir);
   if (possibleProfileDirs.includes(dirName)) {
-    // userDataDir already points to a profile directory
     return path.join(userDataDir, ...pathSegments);
   }
 
-  const defaultPath = path.join(userDataDir, "Default", ...pathSegments);
-
-  return defaultPath;
+  return path.join(userDataDir, "Default", ...pathSegments);
 }
 
 /**

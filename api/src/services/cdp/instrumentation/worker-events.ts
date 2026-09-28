@@ -1,4 +1,5 @@
-import type { Target, Protocol, TargetType, CDPSession } from "puppeteer-core";
+import type { CDPSession } from "patchright";
+import type { Target, Protocol, TargetType } from "./pw-types.js";
 import { BrowserEventType } from "../../../types/index.js";
 import { BrowserLogger } from "./browser-logger.js";
 import { attachNetworkEvents } from "./network-events.js";

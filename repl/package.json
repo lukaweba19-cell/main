@@ -7,7 +7,7 @@
     "start": "tsx ./src/script.ts"
   },
   "dependencies": {
-    "puppeteer-core": "^24.2.0"
+    "patchright": "1.63.0"
   },
   "devDependencies": {
     "tsx": "*"

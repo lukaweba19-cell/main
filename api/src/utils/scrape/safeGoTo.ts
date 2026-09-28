@@ -1,4 +1,4 @@
-import { Page, HTTPResponse } from "puppeteer-core";
+import { Page, Response as HTTPResponse } from "patchright";
 
 /**
  * Navigates to a URL and ignores net::ERR_ABORTED if the main-frame response is a PDF.
@@ -19,7 +19,6 @@ export async function safeGoto(page: Page, url: string, options = {}) {
     if (!isMainFrameDoc) return;
 
     const ct = (res.headers()["content-type"] || "").toLowerCase();
-    console.log("content-type", ct);
     if (ct.includes("application/pdf")) {
       pdfResponse = res;
     }

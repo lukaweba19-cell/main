@@ -129,9 +129,6 @@ export async function isSimilarConfig(
   const normalizeArgs = (args?: string[]) => (args || []).filter(Boolean).slice().sort();
   const normalizeExt = (ext?: string[]) => (ext || []).slice().sort();
 
-  const currentHeadless = current.options?.headless ?? true;
-  const nextHeadless = next.options?.headless ?? true;
-
   const currentProxy = current.options?.proxyUrl || "";
   const nextProxy = next.options?.proxyUrl || "";
 
@@ -144,14 +141,8 @@ export async function isSimilarConfig(
   const currentBlockAds = current.blockAds ?? true;
   const nextBlockAds = next.blockAds ?? true;
 
-  const currentUserAgent = current.userAgent || "";
-  const nextUserAgent = next.userAgent || "";
-
   const currentUserDataDir = current.userDataDir || "";
   const nextUserDataDir = next.userDataDir || "";
-
-  const currentSkipFingerprint = current.skipFingerprintInjection ?? false;
-  const nextSkipFingerprint = next.skipFingerprintInjection ?? false;
 
   const currentWidth = current.dimensions?.width ?? 1920;
   const nextWidth = next.dimensions?.width ?? 1920;
@@ -171,11 +162,8 @@ export async function isSimilarConfig(
   } = (next.extra ?? {}) as Record<string, unknown>;
 
   return (
-    currentHeadless === nextHeadless &&
     currentProxy === nextProxy &&
-    currentUserAgent === nextUserAgent &&
     currentUserDataDir === nextUserDataDir &&
-    currentSkipFingerprint === nextSkipFingerprint &&
     currentWidth === nextWidth &&
     currentHeight === nextHeight &&
     currentBlockAds === nextBlockAds &&

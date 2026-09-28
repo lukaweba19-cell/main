@@ -1,4 +1,4 @@
-import { Browser, Page } from "puppeteer-core";
+import { Browser, Page } from "patchright";
 import { CDPService } from "../../cdp.service.js";
 import { BasePlugin, ShutdownReason } from "./base-plugin.js";
 import { FastifyBaseLogger } from "fastify";

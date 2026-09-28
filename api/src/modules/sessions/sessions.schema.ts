@@ -27,12 +27,15 @@ export const SessionCredentials = z
 
 const CreateSession = z.object({
   sessionId: z.string().uuid().optional().describe("Unique identifier for the session"),
-  proxyUrl: z.string().optional().describe("Proxy URL to use for the session"),
-  userAgent: z.string().optional().describe("User agent string to use for the session"),
+  proxyUrl: z
+    .string()
+    .optional()
+    .describe(
+      "Proxy URL to use for the session. If not provided, the browser uses the host's own IP.",
+    ),
   sessionContext: SessionContextSchema.optional().describe(
     "Session context data to be used in the created session",
   ),
-  isSelenium: z.boolean().optional().describe("Indicates if Selenium is used in the session"),
   blockAds: z
     .boolean()
     .optional()
@@ -54,18 +57,18 @@ const CreateSession = z.object({
     .describe(
       "Enable bandwidth optimizations. Passing true enables all flags (except hosts/patterns). Object allows granular control.",
     ),
-  skipFingerprintInjection: z
-    .boolean()
-    .optional()
-    .describe("Flag to indicate if fingerprint injection should be skipped for this session."),
   deviceConfig: deviceConfigSchema,
   fullscreen: z
     .boolean()
     .optional()
     .describe("Launch the browser in fullscreen mode, covering the full screen with no Chrome UI."),
-  // Specific to hosted steel
   logSinkUrl: z.string().optional().describe("Deprecated: Log sink URL to use for the session"),
-  extensions: z.array(z.string()).optional().describe("Extensions to use for the session"),
+  sessionExtensions: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Additional named extensions to load. Every extension in the extensions directory is loaded automatically — this only adds more.",
+    ),
   persist: z.boolean().optional().describe("Flag to indicate if session should be persisted"),
   userDataDir: z.string().optional().describe("User data directory path to use for the session"),
   timezone: z.string().optional().describe("Timezone to use for the session"),
@@ -87,7 +90,15 @@ const CreateSession = z.object({
     .optional()
     .describe("Extra metadata to help initialize the session"),
   credentials: SessionCredentials,
-  headless: z.boolean().optional().describe("Headless mode for the session"),
+  dangerouslyLogRequestDetails: z
+    .boolean()
+    .optional()
+    .describe("Log full request/response details for this session"),
+  captureWorkerNetwork: z
+    .boolean()
+    .optional()
+    .describe("Capture network events from dedicated workers"),
+  caCertificates: z.array(z.string()).optional().describe("CA certificates for the session"),
 });
 
 const SessionDetails = z.object({
@@ -109,7 +120,7 @@ const SessionDetails = z.object({
   debugUrl: z.string().describe("URL for a viewing the live browser instance for the session"),
   debuggerUrl: z.string().describe("URL for debugging the session"),
   sessionViewerUrl: z.string().describe("URL to view session details"),
-  userAgent: z.string().optional().describe("User agent string used in the session"),
+  userAgent: z.string().optional().describe("User agent reported by the browser"),
   proxy: z.string().optional().describe("Proxy server used for the session"),
   proxyTxBytes: z
     .number()
@@ -121,8 +132,6 @@ const SessionDetails = z.object({
     .int()
     .nonnegative()
     .describe("Amount of data received through the proxy"),
-  solveCaptcha: z.boolean().optional().describe("Indicates if captcha solving is enabled"),
-  isSelenium: z.boolean().optional().describe("Indicates if Selenium is used in the session"),
   deviceConfig: deviceConfigSchema,
 });
 

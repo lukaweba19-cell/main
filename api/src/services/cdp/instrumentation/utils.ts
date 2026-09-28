@@ -1,4 +1,4 @@
-import type { Target, Protocol } from "puppeteer-core";
+import type { Target, Protocol } from "./pw-types.js";
 import { safeStringify } from "./storage/safe-json.js";
 
 export function extractTargetId(target: Target): string {

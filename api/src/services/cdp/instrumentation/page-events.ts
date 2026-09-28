@@ -1,4 +1,5 @@
-import type { Page, CDPSession, TargetType, Protocol } from "puppeteer-core";
+import type { Page, CDPSession } from "patchright";
+import type { TargetType, Protocol } from "./pw-types.js";
 import { BrowserEventType } from "../../../types/index.js";
 import { BrowserLogger } from "./browser-logger.js";
 import { attachNetworkEvents } from "./network-events.js";
@@ -19,7 +20,7 @@ export async function attachPageEvents(
   targetType: TargetType,
   options?: AttachPageEventsOptions,
 ): Promise<void> {
-  const pageId = (page.target() as any)._targetId as string;
+  const pageId = (page as any).__steelPageId ?? "";
 
   // navigation
   page.on("framenavigated", (frame) => {
@@ -71,13 +72,13 @@ export async function attachPageEvents(
     });
   });
 
-  page.on("error", (err) => {
+  page.on("crash", () => {
     logger.record({
       type: BrowserEventType.Error,
       timestamp: new Date().toISOString(),
       pageId,
       targetType,
-      error: { message: err?.message, stack: err?.stack },
+      error: { message: "Page renderer crashed" },
     });
   });
 

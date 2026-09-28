@@ -1,31 +1,21 @@
 import { execSync } from "node:child_process";
 import { EventEmitter } from "events";
 import { FastifyBaseLogger } from "fastify";
-import {
-  BrowserFingerprintWithHeaders,
-  FingerprintGenerator,
-  FingerprintGeneratorOptions,
-  VideoCard,
-} from "fingerprint-generator";
-import { FingerprintInjector } from "fingerprint-injector";
 import fs from "fs";
 import { IncomingMessage } from "http";
 import httpProxy from "http-proxy";
 import os from "os";
 import path from "path";
-import puppeteer, {
-  Browser,
-  BrowserContext,
-  CDPSession,
-  HTTPRequest,
-  Page,
-  Protocol,
-  Target,
-  TargetType,
-} from "puppeteer-core";
+import {
+  Browser as PlaywrightBrowser,
+  BrowserContext as PlaywrightContext,
+  Cookie as PlaywrightCookie,
+  Page as PlaywrightPage,
+  chromium,
+} from "patchright";
+import { TargetType } from "./instrumentation/pw-types.js";
 import { Duplex } from "stream";
 import { env } from "../../env.js";
-import { loadFingerprintScript } from "../../scripts/index.js";
 import { traceable, tracer } from "../../telemetry/tracer.js";
 import { BrowserEventType, BrowserLauncherOptions, EmitEvent } from "../../types/index.js";
 import {
@@ -37,7 +27,7 @@ import {
   compileUrlPatterns,
   isImageRequest,
 } from "../../utils/requests.js";
-import { filterHeaders, getChromeExecutablePath, installMouseHelper } from "../../utils/browser.js";
+import { getChromeExecutablePath } from "../../utils/browser.js";
 import {
   deepMerge,
   extractStorageForPageWithTimeout,
@@ -58,8 +48,6 @@ import {
   BrowserProcessState,
   CleanupError,
   CleanupType,
-  FingerprintError,
-  FingerprintStage,
   LaunchTimeoutError,
   NetworkError,
   NetworkOperation,
@@ -83,17 +71,23 @@ import {
 import { executeBestEffort, executeCritical, executeOptional } from "./utils/error-handlers.js";
 import { TimezoneFetcher } from "../timezone-fetcher.service.js";
 
+/**
+ * Single headful Chromium (patchright) behind the whole API.
+ *
+ * Invariants:
+ * - Headful always. Chrome runs against the Xvfb display; there is no headless mode.
+ * - Every extension in the extensions directory is loaded on every launch, by default.
+ * - No fingerprint spoofing and no user-agent overrides: the browser presents itself.
+ * - One launch path for sessions and scrapes; the browser is shut down when idle.
+ */
 export class CDPService extends EventEmitter {
   private logger: FastifyBaseLogger;
-  private keepAlive: boolean;
-
-  private browserInstance: Browser | null;
+  private browserInstance: PlaywrightBrowser | null;
   private wsEndpoint: string | null;
-  private fingerprintData: BrowserFingerprintWithHeaders | null;
   private sessionContext: SessionData | null;
   private chromeExecPath: string;
   private wsProxyServer: httpProxy;
-  private primaryPage: Page | null;
+  private primaryPage: PlaywrightPage | null;
   private launchConfig?: BrowserLauncherOptions;
   private defaultLaunchConfig: BrowserLauncherOptions;
   private currentSessionConfig: BrowserLauncherOptions | null;
@@ -101,7 +95,7 @@ export class CDPService extends EventEmitter {
   private defaultTimezone: string;
   private pluginManager: PluginManager;
   private trackedOrigins: Set<string> = new Set<string>();
-  private crashedPages: WeakSet<Page> = new WeakSet<Page>();
+  private crashedPages: WeakSet<PlaywrightPage> = new WeakSet<PlaywrightPage>();
   private chromeSessionService: ChromeContextService;
   private retryManager: RetryManager;
   private targetInstrumentationManager: TargetInstrumentationManager;
@@ -124,12 +118,8 @@ export class CDPService extends EventEmitter {
   ) {
     super();
     this.logger = logger.child({ component: "CDPService" });
-    const { keepAlive = true } = config;
-
-    this.keepAlive = keepAlive;
     this.browserInstance = null;
     this.wsEndpoint = null;
-    this.fingerprintData = null;
     this.sessionContext = null;
     this.chromeExecPath = getChromeExecutablePath();
     this.defaultTimezone = env.DEFAULT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -138,7 +128,6 @@ export class CDPService extends EventEmitter {
     this.retryManager = new RetryManager(logger);
 
     this.wsProxyServer = httpProxy.createProxyServer();
-
     this.wsProxyServer.on("error", (err) => {
       this.logger.error(`Proxy server error: ${err}`);
     });
@@ -147,16 +136,11 @@ export class CDPService extends EventEmitter {
     this.currentSessionConfig = null;
     this.shuttingDown = false;
 
-    // Initialize timezone fetcher for cold start
     const timezoneFetcher = new TimezoneFetcher(logger);
     const coldStartTimezone = timezoneFetcher.getTimezone(undefined, this.defaultTimezone);
 
     this.defaultLaunchConfig = {
-      options: {
-        headless: env.CHROME_HEADLESS,
-        args: [],
-        ignoreDefaultArgs: ["--enable-automation"],
-      },
+      options: {},
       blockAds: true,
       extensions: [],
       userDataDir: env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome"),
@@ -185,7 +169,7 @@ export class CDPService extends EventEmitter {
     this.instrumentationLogger?.on?.(EmitEvent.Log, (event, context) => {
       this.emit(EmitEvent.Log, event);
     });
-    this.logger.info("[CDPService] Target instrumentation enabled");
+    this.logger.info("[CDPService] Target instrumentation enabled (patchright, headful)");
   }
 
   public getInstrumentationLogger(): BrowserLogger {
@@ -210,7 +194,7 @@ export class CDPService extends EventEmitter {
     this.disconnectHandler = handler;
   }
 
-  public getBrowserInstance(): Browser | null {
+  public getBrowserInstance(): PlaywrightBrowser | null {
     return this.browserInstance;
   }
 
@@ -236,15 +220,25 @@ export class CDPService extends EventEmitter {
   }
 
   public isRunning(): boolean {
-    return this.browserInstance?.process() !== null;
+    return !!this.browserInstance && this.browserInstance.isConnected();
   }
 
-  public getTargetId(page: Page) {
-    //@ts-ignore
-    return page.target()._targetId;
+  /** CDP target id of a page, fetched via CDP and cached on the page object. */
+  public async getTargetId(page: PlaywrightPage): Promise<string> {
+    const cached = (page as any).__steelTargetId;
+    if (cached) return cached;
+    try {
+      const client = await (page.context() as any).newCDPSession(page);
+      const { targetInfo } = await client.send("Target.getTargetInfo");
+      await client.detach().catch(() => {});
+      (page as any).__steelTargetId = targetInfo.targetId;
+      return targetInfo.targetId;
+    } catch {
+      return "";
+    }
   }
 
-  public async getPrimaryPage(): Promise<Page> {
+  public async getPrimaryPage(): Promise<PlaywrightPage> {
     if (!this.primaryPage || !this.browserInstance) {
       throw new Error("CDPService has not been launched yet!");
     }
@@ -272,17 +266,23 @@ export class CDPService extends EventEmitter {
       if (!this.primaryPage) {
         throw new Error("Browser or primary page not initialized");
       }
-      pageId = this.getTargetId(this.primaryPage);
+      // Prefer the cached id; getTargetId is async and fetches over CDP.
+      pageId =
+        (this.primaryPage as any).__steelTargetId ??
+        (this.primaryPage as any)._delegate?._targetId ??
+        "";
+      if (!pageId) {
+        throw new Error("Primary page target id not yet resolved");
+      }
     }
     return `${wsProtocol}://${baseUrl}/devtools/page/${pageId}`;
   }
 
   public async refreshPrimaryPage() {
     const newPage = await this.createPage();
-    if (this.primaryPage) {
-      // Notify plugins before page close
+    if (this.primaryPage && !this.primaryPage.isClosed()) {
       await this.pluginManager.onBeforePageClose(this.primaryPage);
-      await this.primaryPage.close();
+      await this.primaryPage.close().catch(() => {});
     }
     this.primaryPage = newPage;
   }
@@ -295,7 +295,7 @@ export class CDPService extends EventEmitter {
     return this.pluginManager.unregister(pluginName);
   }
 
-  private async handleTargetChange(target: Target) {
+  private async handleTargetChange(target: any) {
     if (target.type() !== "page") return;
 
     const page = await target.page().catch((e) => {
@@ -306,10 +306,8 @@ export class CDPService extends EventEmitter {
     if (page) {
       this.pluginManager.onPageNavigate(page);
 
-      //@ts-ignore
-      const pageId = page.target()._targetId;
+      const pageId = await this.getTargetId(page);
 
-      // Track the origin of the page
       try {
         const url = page.url();
         if (url && url.startsWith("http")) {
@@ -325,329 +323,7 @@ export class CDPService extends EventEmitter {
     }
   }
 
-  private async handleNewTarget(target: Target) {
-    try {
-      await this.targetInstrumentationManager.attach(target, target.type() as TargetType);
-    } catch (error) {
-      if (isTargetClosedError(error)) {
-        this.logger.debug(
-          { err: error },
-          "[CDPService] Target closed while attaching instrumentation",
-        );
-        return;
-      }
-      this.logger.error({ err: error }, `[CDPService] Error attaching target instrumentation`);
-    }
-
-    if (target.type() === TargetType.PAGE) {
-      const page = await target.page().catch((e) => {
-        if (isTargetClosedError(e)) {
-          this.logger.debug({ err: e }, "[CDPService] Target closed before page handle was ready");
-          return null;
-        }
-        this.logger.error(`Error handling new target in CDPService: ${e}`);
-        return null;
-      });
-
-      if (!page || page.isClosed()) {
-        return;
-      }
-
-      // Puppeteer emits "error" when the renderer for this page crashes. The browser
-      // process survives, so CDP calls against the page hang instead of rejecting.
-      page.on("error", (err) => {
-        this.crashedPages.add(page);
-        this.logger.error({ err, url: safePageUrl(page) }, "[CDPService] Page renderer crashed");
-      });
-
-      try {
-        try {
-          const url = page.url();
-          if (url && url.startsWith("http")) {
-            const origin = new URL(url).origin;
-            this.trackedOrigins.add(origin);
-            this.logger.debug(`[CDPService] Tracking new origin: ${origin}`);
-          }
-        } catch (err) {
-          this.logger.error(`[CDPService] Error tracking origin: ${err}`);
-        }
-
-        // Notify plugins about the new page
-        await this.pluginManager.onPageCreated(page);
-
-        if (page.isClosed()) {
-          return;
-        }
-
-        // Only install mouse helper in headless mode
-        if (this.launchConfig?.options?.headless) {
-          installMouseHelper(page, this.launchConfig?.deviceConfig?.device || "desktop");
-        }
-
-        if (this.launchConfig?.customHeaders) {
-          await page.setExtraHTTPHeaders({
-            ...env.DEFAULT_HEADERS,
-            ...this.launchConfig.customHeaders,
-          });
-        } else if (env.DEFAULT_HEADERS) {
-          await page.setExtraHTTPHeaders(env.DEFAULT_HEADERS);
-        }
-
-        await this.applyDeviceMetricsOverride(page);
-
-        // Inject fingerprint only if it's not skipped
-        if (!env.SKIP_FINGERPRINT_INJECTION && !this.launchConfig?.skipFingerprintInjection) {
-          // Use our safer fingerprint injection method instead of FingerprintInjector
-          await this.injectFingerprintSafely(page, this.fingerprintData);
-          this.logger.debug("[CDPService] Injected fingerprint into page");
-        } else {
-          this.logger.info(
-            "[CDPService] Fingerprint injection skipped due to 'SKIP_FINGERPRINT_INJECTION' setting",
-          );
-        }
-
-        if (page.isClosed()) {
-          return;
-        }
-
-        // Request interception breaks Cloudflare Turnstile / Service Workers
-        // (blob: importScripts NetworkError). Only enable when we actually need
-        // to block resources (ads / bandwidth optimization / URL patterns).
-        const needsInterception =
-          !!this.launchConfig?.blockAds ||
-          !!this.launchConfig?.optimizeBandwidth ||
-          (this.compiledUrlPatterns?.length ?? 0) > 0;
-
-        if (needsInterception) {
-          await page.setRequestInterception(true);
-          page.on("request", (request) => this.handlePageRequest(request, page));
-        }
-
-        page.on("response", (response) => {
-          if (response.url().startsWith("file://")) {
-            this.logger.error(
-              `[CDPService] Blocked response from file protocol: ${response.url()}`,
-            );
-            page.close().catch(() => {});
-            this.endSession(ShutdownReason.SECURITY_VIOLATION);
-          }
-        });
-      } catch (error) {
-        if (isTargetClosedError(error) || page.isClosed()) {
-          this.logger.debug(
-            { err: error },
-            "[CDPService] Target closed while configuring a new page",
-          );
-          return;
-        }
-        this.logger.error({ err: error }, "[CDPService] Error configuring new page");
-      }
-    } else if (target.type() === TargetType.BACKGROUND_PAGE) {
-      this.logger.info(`[CDPService] Background page created: ${target.url()}`);
-    }
-  }
-
-  private async handlePageRequest(request: HTTPRequest, page: Page) {
-    const url = request.url();
-
-    const parsed = tryParseUrl(url);
-
-    const optimize = this.launchConfig?.optimizeBandwidth;
-    const isOptimizeObject = typeof optimize === "object";
-    const blockedHosts = isOptimizeObject ? optimize.blockHosts : undefined;
-
-    if (parsed && this.launchConfig?.blockAds && isAdRequest(parsed)) {
-      this.logger.info(`[CDPService] Blocked request to ad related resource: ${url}`);
-      await request.abort();
-      return;
-    }
-
-    if (
-      (parsed && isHostBlocked(parsed, blockedHosts)) ||
-      isUrlMatchingPatterns(url, this.compiledUrlPatterns)
-    ) {
-      this.logger.info(`[CDPService] Blocked request to blocked host or pattern: ${url}`);
-      await request.abort();
-      return;
-    }
-
-    // Block resources via optimizeBandwidth
-    const blockImages = isOptimizeObject ? !!optimize.blockImages : false;
-    const blockMedia = isOptimizeObject ? !!optimize.blockMedia : false;
-    const blockStylesheets = isOptimizeObject ? !!optimize.blockStylesheets : false;
-
-    if (parsed && (blockImages || blockMedia || blockStylesheets)) {
-      const resourceType = request.resourceType();
-      if (
-        (blockImages && (resourceType === "image" || isImageRequest(parsed))) ||
-        (blockMedia && (resourceType === "media" || isHeavyMediaRequest(parsed))) ||
-        (blockStylesheets && resourceType === "stylesheet")
-      ) {
-        this.logger.info(
-          `[CDPService] Blocked ${resourceType} resource due to optimizeBandwidth (${
-            blockImages ? "blockImages" : ""
-          }${blockMedia ? "blockMedia" : ""}${blockStylesheets ? "blockStylesheets" : ""}): ${url}`,
-        );
-        await request.abort();
-        return;
-      }
-    }
-
-    if (url.startsWith("file://")) {
-      this.logger.error(`[CDPService] Blocked request to file protocol: ${url}`);
-      page.close().catch(() => {});
-      this.endSession(ShutdownReason.SECURITY_VIOLATION);
-    } else {
-      await request.continue();
-    }
-  }
-
-  public async createPage(): Promise<Page> {
-    if (!this.browserInstance) {
-      throw new Error("Browser instance not initialized");
-    }
-    return this.browserInstance.newPage();
-  }
-
-  private async shutdownHook() {
-    for (const mutator of this.shutdownMutators) {
-      await mutator(this.currentSessionConfig);
-    }
-  }
-
-  @traceable
-  public async shutdown(reason: ShutdownReason): Promise<void> {
-    this.shuttingDown = true;
-    this.logger.info(`[CDPService] Shutting down and cleaning up resources (reason: ${reason})`);
-    this.chromeSessionService.invalidate();
-
-    try {
-      if (this.browserInstance) {
-        await this.pluginManager.onBrowserClose(this.browserInstance);
-      }
-
-      await this.pluginManager.onShutdown(reason);
-
-      this.removeAllHandlers();
-      await this.browserInstance?.close();
-      await this.browserInstance?.process()?.kill();
-      await this.shutdownHook();
-
-      this.logger.info("[CDPService] Cleaning up files during shutdown");
-      try {
-        await FileService.getInstance().cleanupFiles();
-        this.logger.info("[CDPService] Files cleaned successfully");
-      } catch (error) {
-        this.logger.error(`[CDPService] Error cleaning files during shutdown: ${error}`);
-      }
-
-      this.fingerprintData = null;
-      this.currentSessionConfig = null;
-      this.browserInstance = null;
-      this.primaryPage = null as any;
-      this.wsEndpoint = null;
-      // Force-kill any leftover Chrome on the debug port (no idle browser)
-      try {
-        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
-      } catch {}
-      this.emit("close");
-      this.shuttingDown = false;
-    } catch (error) {
-      this.logger.error(`[CDPService] Error during shutdown: ${error}`);
-      // Ensure we complete the shutdown even if plugins throw errors
-      await this.browserInstance?.close();
-      await this.browserInstance?.process()?.kill();
-      await this.shutdownHook();
-
-      try {
-        await FileService.getInstance().cleanupFiles();
-      } catch (cleanupError) {
-        this.logger.error(
-          `[CDPService] Error cleaning files during error recovery: ${cleanupError}`,
-        );
-      }
-
-      this.browserInstance = null;
-      this.primaryPage = null as any;
-      try {
-        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
-      } catch {}
-      this.shuttingDown = false;
-    }
-  }
-
-  public getBrowserProcess() {
-    return this.browserInstance?.process() || null;
-  }
-
-  /** Serialize launches so concurrent scrapes do not race launch/shutdown. */
-  private launchChain: Promise<void> = Promise.resolve();
-
-  public async ensureBrowser(config?: BrowserLauncherOptions): Promise<void> {
-    const merged: BrowserLauncherOptions = {
-      skipFingerprintInjection: true,
-      extensions: ["nopecha-bypass", "recorder"],
-      ...(config || {}),
-      options: {
-        headless: env.CHROME_HEADLESS,
-        ...((config && config.options) || {}),
-      },
-    };
-    const run = async () => {
-      if (this.isRunning() && this.browserInstance) return;
-      await this.launch(merged);
-      if (!this.browserInstance) {
-        throw new Error("Browser instance not initialized after launch");
-      }
-    };
-    this.launchChain = this.launchChain.then(run, run);
-    await this.launchChain;
-  }
-
-  public async createBrowserContext(proxyUrl?: string | null): Promise<BrowserContext> {
-    await this.ensureBrowser();
-    if (!this.browserInstance) {
-      throw new Error("Browser instance not initialized");
-    }
-    if (proxyUrl) {
-      return this.browserInstance.createBrowserContext({ proxyServer: proxyUrl });
-    }
-    return this.browserInstance.createBrowserContext();
-  }
-
-  @traceable
-  public async launch(
-    config?: BrowserLauncherOptions,
-    retryOptions?: Partial<RetryOptions>,
-  ): Promise<Browser> {
-    const operation = async () => {
-      try {
-        return await this.launchInternal(config);
-      } catch (error) {
-        try {
-          await this.pluginManager.onShutdown(ShutdownReason.LAUNCH_FAILURE);
-          await this.shutdownHook();
-        } catch (e) {
-          this.logger.warn(
-            `[CDPService] Error during retry cleanup (onShutdown/shutdownHook): ${e}`,
-          );
-        }
-        throw error;
-      }
-    };
-
-    // Use retry mechanism for the launch process
-    const result = await this.retryManager.executeWithRetry(
-      operation,
-      "Browser Launch",
-      retryOptions,
-    );
-
-    return result.result;
-  }
-
-  @traceable
-  private async launchInternal(config?: BrowserLauncherOptions): Promise<Browser> {
+  private async launchInternal(config?: BrowserLauncherOptions): Promise<PlaywrightBrowser> {
     try {
       const launchTimeout = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new LaunchTimeoutError(60000)), 60000);
@@ -660,7 +336,7 @@ export class CDPService extends EventEmitter {
 
         if (shouldReuseInstance) {
           this.logger.info(
-            "[CDPService] Reusing existing browser instance with default configuration.",
+            "[CDPService] Reusing existing headful browser instance with matching configuration.",
           );
           this.launchConfig = config || this.defaultLaunchConfig;
 
@@ -679,7 +355,6 @@ export class CDPService extends EventEmitter {
               ),
           );
 
-          // Session context injection - should throw error if it fails
           if (this.launchConfig?.sessionContext) {
             this.logger.debug(
               `[CDPService] Session created with session context, injecting session context`,
@@ -726,15 +401,13 @@ export class CDPService extends EventEmitter {
         const rawPatterns = typeof optimize === "object" ? optimize.blockUrlPatterns : undefined;
         this.compiledUrlPatterns = rawPatterns?.length ? compileUrlPatterns(rawPatterns) : [];
 
-        this.logger.info("[CDPService] Launching new browser instance.");
+        this.logger.info("[CDPService] Launching new headful browser instance.");
 
-        // Validate configuration
         await executeCritical(
           async () => validateLaunchConfig(this.launchConfig!),
           (error) => categorizeError(error, "configuration validation"),
         );
 
-        // File cleanup - non-critical, log errors but continue
         this.logger.info("[CDPService] Cleaning up files before browser launch");
         await executeOptional(
           this.logger,
@@ -750,10 +423,8 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        const { options, userAgent, userDataDir, fingerprint } = this.launchConfig;
-        this.fingerprintData = fingerprint ?? null;
+        const { options, userDataDir } = this.launchConfig;
 
-        // Run launch mutators - plugin errors should be caught
         await executeCritical(
           async () => {
             for (const mutator of this.launchMutators) {
@@ -766,122 +437,6 @@ export class CDPService extends EventEmitter {
               PluginName.LAUNCH_MUTATOR,
               PluginOperation.PRE_LAUNCH_HOOK,
               true,
-              error,
-            ),
-        );
-
-        // Fingerprint generation - can fail gracefully
-        if (
-          !env.SKIP_FINGERPRINT_INJECTION &&
-          !userAgent &&
-          !this.launchConfig.skipFingerprintInjection &&
-          !this.fingerprintData
-        ) {
-          await executeCritical(
-            async () => {
-              let fingerprintOptions: Partial<FingerprintGeneratorOptions> = {
-                devices: ["desktop"],
-                operatingSystems: ["linux"],
-                browsers: [{ name: "chrome", minVersion: 146 }],
-                locales: ["en-US", "en"],
-                screen: {
-                  minWidth: this.launchConfig!.dimensions?.width ?? 1920,
-                  minHeight: this.launchConfig!.dimensions?.height ?? 1080,
-                  maxWidth: this.launchConfig!.dimensions?.width ?? 1920,
-                  maxHeight: this.launchConfig!.dimensions?.height ?? 1080,
-                },
-              };
-
-              if (this.launchConfig!.deviceConfig?.device === "mobile") {
-                fingerprintOptions = {
-                  devices: ["mobile"],
-                  locales: ["en-US", "en"],
-                };
-              }
-
-              // fingerprint-generator's bundled dataset lags the latest Chrome
-              // release, so a hardcoded newest-Chrome `minVersion` (and/or the
-              // tight `screen` box) can leave zero matching samples and make
-              // getFingerprint() throw deterministically. Prefer the strict
-              // options for best stealth, but relax progressively rather than
-              // hard-fail when the dataset cannot satisfy them.
-              const fallbackOptions: Array<Partial<FingerprintGeneratorOptions>> = [
-                fingerprintOptions,
-                { ...fingerprintOptions, browsers: [{ name: "chrome" }] },
-                { ...fingerprintOptions, browsers: [{ name: "chrome" }], screen: undefined },
-              ];
-              let fingerprintErr: unknown;
-              for (const options of fallbackOptions) {
-                try {
-                  this.fingerprintData = new FingerprintGenerator(options).getFingerprint();
-                  if (options !== fingerprintOptions) {
-                    this.logger.warn(
-                      { requested: fingerprintOptions, used: options },
-                      "[CDPService] Strict fingerprint constraints unsatisfiable in the bundled dataset; generated with relaxed constraints",
-                    );
-                  }
-                  break;
-                } catch (err) {
-                  fingerprintErr = err;
-                }
-              }
-              if (!this.fingerprintData) {
-                throw fingerprintErr;
-              }
-            },
-            (error) => {
-              this.logger.error({ err: error }, "[CDPService] Error generating fingerprint");
-              return new FingerprintError(
-                error instanceof Error ? error.message : String(error),
-                FingerprintStage.GENERATION,
-                error,
-              );
-            },
-          );
-        } else if (this.fingerprintData) {
-          this.logger.info(
-            `[CDPService] Using existing fingerprint with user agent: ${this.fingerprintData.fingerprint.navigator.userAgent}`,
-          );
-        }
-
-        const isHeadless = !!this.launchConfig?.options?.headless;
-
-        this.currentSessionConfig = {
-          ...this.launchConfig,
-          dimensions: this.launchConfig.dimensions || this.fingerprintData?.fingerprint.screen,
-          userAgent:
-            this.launchConfig.userAgent || this.fingerprintData?.fingerprint.navigator.userAgent,
-        };
-
-        const extensionPaths = await executeCritical(
-          async () => {
-            const defaultExtensions = isHeadless ? ["recorder"] : [];
-            const customExtensions = this.launchConfig!.extensions
-              ? [...this.launchConfig!.extensions]
-              : [];
-
-            // Get named extension paths
-            const namedExtensionPaths = await getExtensionPaths([
-              ...defaultExtensions,
-              ...customExtensions,
-            ]);
-
-            // Check for session extensions passed from the API
-            let sessionExtensionPaths: string[] = [];
-            if (this.launchConfig!.extra?.orgExtensions?.paths) {
-              sessionExtensionPaths = this.launchConfig!.extra.orgExtensions.paths;
-              this.logger.info(
-                `[CDPService] Found ${sessionExtensionPaths.length} session extension paths`,
-              );
-            }
-
-            return [...namedExtensionPaths, ...sessionExtensionPaths];
-          },
-          (error) =>
-            new ResourceError(
-              `Failed to resolve extension paths: ${error}`,
-              ResourceType.EXTENSIONS,
-              false,
               error,
             ),
         );
@@ -904,12 +459,18 @@ export class CDPService extends EventEmitter {
           timezone = validatedTimezone ?? this.defaultTimezone;
         }
 
-        const extensionArgs = extensionPaths.length
-          ? [
-              `--load-extension=${extensionPaths.join(",")}`,
-              `--disable-extensions-except=${extensionPaths.join(",")}`,
-            ]
-          : [];
+        // Every extension in the extensions directory loads by default; any
+        // extra named extensions requested by the caller must exist there too.
+        const extensionPaths = await executeCritical(
+          async () => getExtensionPaths(this.launchConfig!.extensions ?? []),
+          (error) =>
+            new ResourceError(
+              `Failed to resolve extension paths: ${error}`,
+              ResourceType.EXTENSIONS,
+              false,
+              error,
+            ),
+        );
 
         const shouldDisableSandbox =
           env.DISABLE_CHROME_SANDBOX ||
@@ -918,12 +479,8 @@ export class CDPService extends EventEmitter {
         const staticDefaultArgs = [
           "--remote-allow-origins=*",
           "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--use-gl=swiftshader",
-          "--enable-webgl",
-          "--ignore-gpu-blocklist",
           "--disable-blink-features=AutomationControlled",
-          "--disable-features=TranslateUI,PrivacySandboxSettings4,InterestFeedContentSuggestions,MediaRouter,DialMediaRouteProvider,OptimizationHints,DisableLoadExtensionCommandLineSwitch,DisableDisableExtensionsExceptCommandLineSwitch",
+          "--disable-features=TranslateUI,PrivacySandboxSettings4,InterestFeedContentSuggestions,MediaRouter,DialMediaRouteProvider,OptimizationHints",
           "--enable-features=Clipboard",
           "--no-default-browser-check",
           "--disable-sync",
@@ -967,26 +524,13 @@ export class CDPService extends EventEmitter {
           "--disable-hang-monitor",
         ];
 
-        const headlessArgs = [
-          "--headless=new",
-          "--hide-crash-restore-bubble",
-          "--disable-gpu",
-          "--disable-blink-features=AutomationControlled",
-          // can we just remove this outright?
-          `--unsafely-treat-insecure-origin-as-secure=http://localhost:3000,http://${env.HOST}:${env.PORT}`,
-        ];
-
         const dynamicArgs = [
           this.launchConfig.dimensions ? "" : "--start-maximized",
-          `--remote-debugging-address=${env.HOST}`,
-          "--remote-debugging-port=9222",
+          `--remote-debugging-address=127.0.0.1`,
+          `--remote-debugging-port=${env.CDP_REDIRECT_PORT}`,
           `--window-size=${this.launchConfig.dimensions?.width ?? 1920},${
             this.launchConfig.dimensions?.height ?? 1080
           }`,
-          userAgent ? `--user-agent=${userAgent}` : "",
-          this.launchConfig.options.proxyUrl
-            ? `--proxy-server=${this.launchConfig.options.proxyUrl}`
-            : "",
           this.launchConfig.fullscreen === true ? "--kiosk" : "",
         ];
 
@@ -994,47 +538,61 @@ export class CDPService extends EventEmitter {
 
         const launchArgs = uniq([
           ...staticDefaultArgs,
-          ...(isHeadless ? headlessArgs : headfulArgs),
+          ...headfulArgs,
           ...dynamicArgs,
-          ...extensionArgs,
           ...(options.args || []),
           ...(env.CHROME_ARGS || []),
         ]).filter((arg) => !env.FILTER_CHROME_ARGS.includes(arg));
 
-        const finalLaunchOptions = {
-          ...options,
-          defaultViewport: null,
-          args: launchArgs,
-          executablePath: this.chromeExecPath,
-          ignoreDefaultArgs: ["--enable-automation"],
-          timeout: 0,
-          env: {
-            HOME: os.userInfo().homedir,
-            TZ: timezone,
-            ...(isHeadless ? {} : { DISPLAY: env.DISPLAY }),
-          },
-          userDataDir,
-          dumpio: env.DEBUG_CHROME_PROCESS, // Enable Chrome process stdout and stderr
-        };
+        const userDataDirToUse =
+          userDataDir || env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome");
+        await fs.promises.mkdir(userDataDirToUse, { recursive: true });
 
-        this.logger.info(`[CDPService] Launch Options:`);
-        this.logger.info(JSON.stringify(finalLaunchOptions, null, 2));
-
-        if (userDataDir && this.launchConfig.userPreferences) {
-          this.logger.info(`[CDPService] Setting up user preferences in ${userDataDir}`);
+        if (this.launchConfig.userPreferences) {
+          this.logger.info(`[CDPService] Setting up user preferences in ${userDataDirToUse}`);
           await executeBestEffort(
             this.logger,
-            async () => this.setupUserPreferences(userDataDir, this.launchConfig!.userPreferences!),
+            async () =>
+              this.setupUserPreferences(userDataDirToUse, this.launchConfig!.userPreferences!),
             "Failed to set up user preferences",
           );
         }
 
-        // Browser process launch - most critical step
+        // Persistent context = real Chrome profile directory. This is what makes
+        // --load-extension work and behaves exactly like a user-launched browser.
+        const launchOptions: Record<string, unknown> = {
+          headless: false as const,
+          executablePath: this.chromeExecPath || undefined,
+          viewport: this.launchConfig.dimensions
+            ? {
+                width: this.launchConfig.dimensions.width,
+                height: this.launchConfig.dimensions.height,
+              }
+            : null,
+          args: launchArgs,
+          ignoreDefaultArgs: ["--enable-automation"],
+          timeout: 0,
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
+          env: {
+            ...process.env,
+            HOME: os.userInfo().homedir,
+            TZ: timezone,
+            DISPLAY: env.DISPLAY,
+          },
+          proxy: options.proxyUrl ? { server: options.proxyUrl } : undefined,
+          dumpio: env.DEBUG_CHROME_PROCESS,
+        };
+
+        this.logger.info(`[CDPService] Launch Options:`);
+        this.logger.info(JSON.stringify({ ...launchOptions, env: undefined }, null, 2));
+
         this.browserInstance = await executeCritical(
           async () =>
             (await tracer.startActiveSpan("CDPService.launchBrowser", async () => {
-              return await puppeteer.launch(finalLaunchOptions);
-            })) as unknown as Browser,
+              return await chromium.launchPersistentContext(userDataDirToUse, launchOptions as any);
+            })) as unknown as PlaywrightBrowser,
           (error) =>
             new BrowserProcessError(
               error instanceof Error ? error.message : String(error),
@@ -1043,10 +601,14 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        // Plugin notifications - catch individual plugin errors
+        // Persistent contexts expose their browser handle for target-level events.
+        const contextAny = this.browserInstance as unknown as any;
+        const browserHandle: PlaywrightBrowser =
+          contextAny.browser?.() ?? (this.browserInstance as unknown as PlaywrightBrowser);
+
         await executeOptional(
           this.logger,
-          async () => this.pluginManager.onBrowserLaunch(this.browserInstance!),
+          async () => this.pluginManager.onBrowserLaunch(browserHandle as any),
           (error) =>
             new PluginError(
               error instanceof Error ? error.message : String(error),
@@ -1057,27 +619,19 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        this.browserInstance.on("error", (err) => {
-          this.logger.error(`[CDPService] Browser error: ${err}`);
-          const error = err as Error;
-          this.instrumentationLogger.record({
-            type: BrowserEventType.BrowserError,
-            error: { message: error?.message, stack: error?.stack },
-            timestamp: new Date().toISOString(),
-          });
-        });
+        (browserHandle as any).on?.("disconnected", this.onDisconnect.bind(this));
 
-        this.primaryPage = await executeCritical(
-          async () => (await this.browserInstance!.pages())[0],
+        const pages = await executeCritical(
+          async () => (await (this.browserInstance as any).pages()) as PlaywrightPage[],
           (error) =>
             new BrowserProcessError(
-              "Failed to get primary page from browser instance",
+              "Failed to get pages from browser instance",
               BrowserProcessState.PAGE_ACCESS,
               error,
             ),
         );
+        this.primaryPage = pages[0] ?? (await this.createPage());
 
-        // Session context injection - should throw error if it fails
         if (this.launchConfig?.sessionContext) {
           this.logger.debug(
             `[CDPService] Session created with session context, injecting session context`,
@@ -1102,7 +656,9 @@ export class CDPService extends EventEmitter {
           this.logger,
           async () => {
             const downloadPath = FileService.getInstance().getBaseFilesPath();
-            const cdpSession = await this.browserInstance!.target().createCDPSession();
+            const cdpSession = await (this.primaryPage!.context() as any).newCDPSession(
+              this.primaryPage!,
+            );
             await cdpSession.send("Browser.setDownloadBehavior", {
               behavior: "allow",
               downloadPath: downloadPath,
@@ -1116,41 +672,13 @@ export class CDPService extends EventEmitter {
           "Failed to configure download behavior",
         );
 
-        this.browserInstance.on("targetcreated", (target) => {
-          void this.handleNewTarget(target).catch((error) => {
-            if (isTargetClosedError(error)) {
-              this.logger.debug(
-                { err: error },
-                "[CDPService] Target closed while handling targetcreated",
-              );
-              return;
-            }
-            this.logger.error({ err: error }, "[CDPService] Unhandled error in handleNewTarget");
-          });
-        });
-        this.browserInstance.on("targetchanged", this.handleTargetChange.bind(this));
-        this.browserInstance.on("targetdestroyed", (target) => {
-          const targetId = (target as any)._targetId;
-          this.targetInstrumentationManager.detach(targetId);
-        });
-        this.browserInstance.on("disconnected", this.onDisconnect.bind(this));
-
-        this.wsEndpoint = await executeCritical(
-          async () => this.browserInstance!.wsEndpoint(),
-          (error) =>
-            new NetworkError(
-              "Failed to get WebSocket endpoint from browser",
-              NetworkOperation.WEBSOCKET_SETUP,
-              error,
-            ),
-        );
-
-        // Final setup steps
+        // Final setup steps: instrument every current and future target.
         await executeOptional(
           this.logger,
           async () => {
-            await this.handleNewTarget(this.primaryPage!.target());
-            await this.handleTargetChange(this.primaryPage!.target());
+            for (const page of await (this.browserInstance as any).pages()) {
+              await this.attachPageInstrumentation(page);
+            }
           },
           (error) =>
             new BrowserProcessError(
@@ -1160,19 +688,18 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        try {
-          const existingTargets = await this.browserInstance.targets();
-          for (const target of existingTargets) {
-            if ((target as any)._targetId !== (this.primaryPage.target() as any)._targetId) {
-              await this.targetInstrumentationManager.attach(target, target.type() as TargetType);
+        (this.browserInstance as any).on("page", (page: PlaywrightPage) => {
+          void this.attachPageInstrumentation(page).catch((error) => {
+            if (isTargetClosedError(error)) {
+              this.logger.debug(
+                { err: error },
+                "[CDPService] Page closed while attaching instrumentation",
+              );
+              return;
             }
-          }
-          this.logger.info(
-            `[CDPService] Attached instrumentation to ${existingTargets.length} existing targets`,
-          );
-        } catch (error) {
-          this.logger.error({ err: error }, `[CDPService] Error attaching to existing targets`);
-        }
+            this.logger.error({ err: error }, "[CDPService] Unhandled error in page setup");
+          });
+        });
 
         if (!this.shuttingDown && this.browserInstance) {
           await this.pluginManager.onBrowserReady(this.launchConfig);
@@ -1184,10 +711,10 @@ export class CDPService extends EventEmitter {
           );
         }
 
-        return this.browserInstance;
+        return browserHandle;
       })();
 
-      return (await Promise.race([launchProcess, launchTimeout])) as Browser;
+      return (await Promise.race([launchProcess, launchTimeout])) as PlaywrightBrowser;
     } catch (error: unknown) {
       const categorizedError =
         error instanceof BaseLaunchError ? error : categorizeError(error, "browser launch");
@@ -1207,6 +734,260 @@ export class CDPService extends EventEmitter {
     }
   }
 
+  /** Wire request rules, tracking and plugins onto a page; safe to call twice. */
+  private async attachPageInstrumentation(page: PlaywrightPage): Promise<void> {
+    const pageId = await this.getTargetId(page);
+    (page as any).__steelPageId = pageId;
+
+    try {
+      await this.targetInstrumentationManager.attach(
+        {
+          url: () => page.url(),
+          type: () => "page",
+          page: async () => page,
+          createCDPSession: async () =>
+            (page.context() as any).newCDPSession(page),
+          asPage: async () => page,
+        } as any,
+        TargetType.PAGE,
+      );
+    } catch (error) {
+      if (!isTargetClosedError(error)) {
+        this.logger.error({ err: error }, `[CDPService] Error attaching target instrumentation`);
+      }
+    }
+
+    if (page.isClosed()) return;
+
+    page.on("crash", () => {
+      this.crashedPages.add(page);
+      this.logger.error({ url: safePageUrl(page) }, "[CDPService] Page renderer crashed");
+    });
+
+    try {
+      if (this.launchConfig?.customHeaders) {
+        await page
+          .setExtraHTTPHeaders({ ...env.DEFAULT_HEADERS, ...this.launchConfig.customHeaders })
+          .catch(() => {});
+      } else if (env.DEFAULT_HEADERS) {
+        await page.setExtraHTTPHeaders(env.DEFAULT_HEADERS).catch(() => {});
+      }
+
+      // Request interception breaks Cloudflare Turnstile / Service Workers
+      // (blob: importScripts NetworkError). Only enable when we actually need
+      // to block resources (ads / bandwidth optimization / URL patterns).
+      const needsInterception =
+        !!this.launchConfig?.blockAds ||
+        !!this.launchConfig?.optimizeBandwidth ||
+        (this.compiledUrlPatterns?.length ?? 0) > 0;
+
+      if (needsInterception) {
+        await page.route("**/*", (route) => {
+          this.handlePageRequest(route, page).catch(() => {});
+        });
+      }
+
+      page.on("response", (response) => {
+        if (response.url().startsWith("file://")) {
+          this.logger.error(`[CDPService] Blocked response from file protocol: ${response.url()}`);
+          page.close().catch(() => {});
+          this.endSession(ShutdownReason.SECURITY_VIOLATION);
+        }
+      });
+
+      await this.pluginManager.onPageCreated(page);
+
+      this.emit(EmitEvent.PageId, { pageId });
+    } catch (error) {
+      if (isTargetClosedError(error) || page.isClosed()) {
+        this.logger.debug(
+          { err: error },
+          "[CDPService] Page closed while configuring instrumentation",
+        );
+        return;
+      }
+      this.logger.error({ err: error }, "[CDPService] Error configuring new page");
+    }
+  }
+
+  private async handlePageRequest(route: any, page: PlaywrightPage) {
+    const url = route.request().url();
+    const parsed = tryParseUrl(url);
+
+    const optimize = this.launchConfig?.optimizeBandwidth;
+    const isOptimizeObject = typeof optimize === "object";
+    const blockedHosts = isOptimizeObject ? optimize.blockHosts : undefined;
+
+    if (parsed && this.launchConfig?.blockAds && isAdRequest(parsed)) {
+      this.logger.info(`[CDPService] Blocked request to ad related resource: ${url}`);
+      await route.abort().catch(() => {});
+      return;
+    }
+
+    if (
+      (parsed && isHostBlocked(parsed, blockedHosts)) ||
+      isUrlMatchingPatterns(url, this.compiledUrlPatterns)
+    ) {
+      this.logger.info(`[CDPService] Blocked request to blocked host or pattern: ${url}`);
+      await route.abort().catch(() => {});
+      return;
+    }
+
+    const blockImages = isOptimizeObject ? !!optimize.blockImages : false;
+    const blockMedia = isOptimizeObject ? !!optimize.blockMedia : false;
+    const blockStylesheets = isOptimizeObject ? !!optimize.blockStylesheets : false;
+
+    if (parsed && (blockImages || blockMedia || blockStylesheets)) {
+      const resourceType = route.request().resourceType();
+      if (
+        (blockImages && (resourceType === "image" || isImageRequest(parsed))) ||
+        (blockMedia && (resourceType === "media" || isHeavyMediaRequest(parsed))) ||
+        (blockStylesheets && resourceType === "stylesheet")
+      ) {
+        this.logger.info(
+          `[CDPService] Blocked ${resourceType} resource due to optimizeBandwidth (${url})`,
+        );
+        await route.abort().catch(() => {});
+        return;
+      }
+    }
+
+    if (url.startsWith("file://")) {
+      this.logger.error(`[CDPService] Blocked request to file protocol: ${url}`);
+      page.close().catch(() => {});
+      this.endSession(ShutdownReason.SECURITY_VIOLATION);
+    } else {
+      await route.continue().catch(() => {});
+    }
+  }
+
+  public async createPage(): Promise<PlaywrightPage> {
+    if (!this.browserInstance) {
+      throw new Error("Browser instance not initialized");
+    }
+    return this.browserInstance.newPage();
+  }
+
+  private async shutdownHook() {
+    for (const mutator of this.shutdownMutators) {
+      await mutator(this.currentSessionConfig);
+    }
+  }
+
+  @traceable
+  public async shutdown(reason: ShutdownReason): Promise<void> {
+    this.shuttingDown = true;
+    this.logger.info(`[CDPService] Shutting down and cleaning up resources (reason: ${reason})`);
+    this.chromeSessionService.invalidate();
+
+    try {
+      if (this.browserInstance) {
+        await this.pluginManager.onBrowserClose(this.browserInstance as any);
+      }
+
+      await this.pluginManager.onShutdown(reason);
+
+      this.removeAllHandlers();
+      await this.browserInstance?.close().catch(() => {});
+      await this.shutdownHook();
+
+      this.logger.info("[CDPService] Cleaning up files during shutdown");
+      try {
+        await FileService.getInstance().cleanupFiles();
+        this.logger.info("[CDPService] Files cleaned successfully");
+      } catch (error) {
+        this.logger.error(`[CDPService] Error cleaning files during shutdown: ${error}`);
+      }
+
+      this.currentSessionConfig = null;
+      this.browserInstance = null;
+      this.primaryPage = null as any;
+      this.wsEndpoint = null;
+      this.emit("close");
+      this.shuttingDown = false;
+    } catch (error) {
+      this.logger.error(`[CDPService] Error during shutdown: ${error}`);
+      await this.browserInstance?.close().catch(() => {});
+      await this.shutdownHook();
+
+      try {
+        await FileService.getInstance().cleanupFiles();
+      } catch (cleanupError) {
+        this.logger.error(
+          `[CDPService] Error cleaning files during error recovery: ${cleanupError}`,
+        );
+      }
+
+      this.browserInstance = null;
+      this.primaryPage = null as any;
+      this.shuttingDown = false;
+    }
+  }
+
+  /** Serialize launches so concurrent scrapes do not race launch/shutdown. */
+  private launchChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Ensure the shared headful browser is up. All work (sessions, scrapes, casts)
+   * funnels through here; extensions load automatically on every launch.
+   */
+  public async ensureBrowser(config?: BrowserLauncherOptions): Promise<void> {
+    const merged: BrowserLauncherOptions = {
+      ...(config || {}),
+      options: { ...((config && config.options) || {}) },
+    };
+    const run = async () => {
+      if (this.isRunning() && this.browserInstance) return;
+      await this.launch(merged);
+      if (!this.browserInstance) {
+        throw new Error("Browser instance not initialized after launch");
+      }
+    };
+    this.launchChain = this.launchChain.then(run, run);
+    await this.launchChain;
+  }
+
+  public async createBrowserContext(proxyUrl?: string | null): Promise<PlaywrightContext> {
+    await this.ensureBrowser();
+    if (!this.browserInstance) {
+      throw new Error("Browser instance not initialized");
+    }
+    if (proxyUrl) {
+      return this.browserInstance.newContext({ proxy: { server: proxyUrl } });
+    }
+    return this.browserInstance.newContext();
+  }
+
+  @traceable
+  public async launch(
+    config?: BrowserLauncherOptions,
+    retryOptions?: Partial<RetryOptions>,
+  ): Promise<PlaywrightBrowser> {
+    const operation = async () => {
+      try {
+        return await this.launchInternal(config);
+      } catch (error) {
+        try {
+          await this.pluginManager.onShutdown(ShutdownReason.LAUNCH_FAILURE);
+          await this.shutdownHook();
+        } catch (e) {
+          this.logger.warn(
+            `[CDPService] Error during retry cleanup (onShutdown/shutdownHook): ${e}`,
+          );
+        }
+        throw error;
+      }
+    };
+
+    const result = await this.retryManager.executeWithRetry(
+      operation,
+      "Browser Launch",
+      retryOptions,
+    );
+
+    return result.result;
+  }
+
   @traceable
   public async proxyWebSocket(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     if (this.proxyWebSocketHandler) {
@@ -1215,52 +996,36 @@ export class CDPService extends EventEmitter {
       return;
     }
 
-    if (!this.wsEndpoint) {
+    if (!this.isRunning()) {
       throw new Error(`WebSocket endpoint not available. Ensure the browser is launched first.`);
     }
 
     const cleanupListeners = () => {
-      this.browserInstance?.off("close", cleanupListeners);
-      if (this.browserInstance?.process()) {
-        this.browserInstance.process()?.off("close", cleanupListeners);
-      }
-      this.browserInstance?.off("disconnected", cleanupListeners);
       socket.off("close", cleanupListeners);
       socket.off("error", cleanupListeners);
       this.logger.info("[CDPService] WebSocket connection listeners cleaned up");
     };
 
-    this.browserInstance?.once("close", cleanupListeners);
-    if (this.browserInstance?.process()) {
-      this.browserInstance.process()?.once("close", cleanupListeners);
-    }
-    this.browserInstance?.once("disconnected", cleanupListeners);
     socket.once("close", cleanupListeners);
     socket.once("error", cleanupListeners);
-
-    // Increase max listeners
-    if (this.browserInstance?.process()) {
-      this.browserInstance.process()!.setMaxListeners(60);
-    }
 
     this.wsProxyServer.ws(
       req,
       socket,
       head,
       {
-        target: this.wsEndpoint,
+        target: `ws://127.0.0.1:${env.CDP_REDIRECT_PORT}`,
       },
       (error) => {
         if (error) {
           this.logger.error(`WebSocket proxy error: ${error}`);
-          cleanupListeners(); // Clean up on error too
+          cleanupListeners();
         }
       },
     );
 
     socket.on("error", (error) => {
       this.logger.error(`Socket error: ${error}`);
-      // Try to end the socket properly on error
       try {
         socket.end();
       } catch (e) {
@@ -1269,28 +1034,33 @@ export class CDPService extends EventEmitter {
     });
   }
 
-  public getUserAgent() {
-    return (
-      this.currentSessionConfig?.userAgent || this.fingerprintData?.fingerprint.navigator.userAgent
-    );
+  /**
+   * The browser's real user agent. Nothing is spoofed at the service level; a
+   * live value is read from the page when callers need one.
+   */
+  public async getLiveUserAgent(): Promise<string | undefined> {
+    try {
+      const page = await this.getPrimaryPage();
+      return await page.evaluate(() => navigator.userAgent);
+    } catch {
+      return undefined;
+    }
+  }
+
+  public getUserAgent(): string | undefined {
+    // No spoofed agent: the browser reports itself.
+    return undefined;
   }
 
   public getDimensions() {
     return this.currentSessionConfig?.dimensions || { width: 1920, height: 1080 };
   }
 
-  public getFingerprintData(): BrowserFingerprintWithHeaders | null {
-    return this.fingerprintData;
-  }
-
-  public async getCookies(): Promise<Protocol.Network.Cookie[]> {
+  public async getCookies(): Promise<PlaywrightCookie[]> {
     if (!this.primaryPage) {
       throw new Error("Primary page not initialized");
     }
-    const client = await this.primaryPage.createCDPSession();
-    const { cookies } = await client.send("Network.getAllCookies");
-    await client.detach();
-    return cookies;
+    return this.primaryPage.context().cookies();
   }
 
   public async getBrowserState(): Promise<SessionData> {
@@ -1308,16 +1078,16 @@ export class CDPService extends EventEmitter {
     try {
       this.logger.info(`[CDPService] Dumping session data from userDataDir: ${userDataDir}`);
 
-      // Run session data extraction and CDP storage extraction in parallel
       const [cookieData, sessionData, storageData] = await Promise.all([
-        this.getCookies(),
-        this.chromeSessionService.getSessionData(userDataDir),
+        this.getCookies().catch(() => []),
+        this.chromeSessionService
+          .getSessionData(userDataDir)
+          .catch(() => ({}) as SessionData),
         this.getExistingPageSessionData(),
       ]);
 
-      // Merge storage data with session data
       const result = {
-        cookies: cookieData,
+        cookies: cookieData as any,
         localStorage: {
           ...(sessionData.localStorage || {}),
           ...(storageData.localStorage || {}),
@@ -1341,9 +1111,6 @@ export class CDPService extends EventEmitter {
     }
   }
 
-  /**
-   * Extract all storage data (localStorage, sessionStorage, IndexedDB) for all open pages
-   */
   private async getExistingPageSessionData(): Promise<SessionData> {
     if (!this.browserInstance || !this.primaryPage) {
       return {};
@@ -1356,7 +1123,7 @@ export class CDPService extends EventEmitter {
     };
 
     try {
-      const pages = await this.browserInstance.pages();
+      const pages = (await (this.browserInstance as any).pages()) as PlaywrightPage[];
 
       let crashedCount = 0;
       const validPages = pages.filter((page) => {
@@ -1378,10 +1145,9 @@ export class CDPService extends EventEmitter {
       );
 
       const results = await Promise.all(
-        validPages.map((page) => extractStorageForPageWithTimeout(page, this.logger)),
+        validPages.map((page) => extractStorageForPageWithTimeout(page as any, this.logger)),
       );
 
-      // Merge all results
       for (const item of results) {
         for (const domain in item.localStorage) {
           result.localStorage![domain] = {
@@ -1412,16 +1178,21 @@ export class CDPService extends EventEmitter {
     }
   }
 
-  public async getAllPages() {
-    return this.browserInstance?.pages() || [];
+  public async getAllPages(): Promise<PlaywrightPage[]> {
+    if (!this.browserInstance) return [];
+    try {
+      return (await (this.browserInstance as any).pages()) as PlaywrightPage[];
+    } catch {
+      return [];
+    }
   }
 
   @traceable
-  public async startNewSession(sessionConfig: BrowserLauncherOptions): Promise<Browser> {
+  public async startNewSession(sessionConfig: BrowserLauncherOptions): Promise<PlaywrightBrowser> {
     this.currentSessionConfig = sessionConfig;
-    this.trackedOrigins.clear(); // Clear tracked origins when starting a new session
+    this.sessionContext = null;
+    this.trackedOrigins.clear();
 
-    // Recreate target instrumentation manager with session-specific options
     this.targetInstrumentationManager = new TargetInstrumentationManager(
       this.instrumentationLogger,
       this.logger,
@@ -1431,14 +1202,11 @@ export class CDPService extends EventEmitter {
       },
     );
 
-    // Notify plugins that a session is starting, before any launch/reuse work begins.
-    // This is the earliest point where session context (e.g. sessionId) is available.
     await this.pluginManager.onSessionStart(sessionConfig);
 
     try {
       return await this.launch(sessionConfig);
     } catch (error) {
-      // If launch fails, ensure we still notify plugins about session end to allow for proper cleanup
       await this.pluginManager.onBeforeSessionEnd(sessionConfig);
       await this.pluginManager.onSessionEnd(sessionConfig);
       await this.pluginManager.onAfterSessionEnd(sessionConfig);
@@ -1453,7 +1221,6 @@ export class CDPService extends EventEmitter {
   ): Promise<void> {
     this.logger.info("Ending current session and resetting to default configuration.");
     const sessionConfig = this.currentSessionConfig;
-    const relaunchIdle = options?.relaunchIdle === true;
 
     this.sessionContext = await this.getBrowserState().catch(() => null);
 
@@ -1471,8 +1238,6 @@ export class CDPService extends EventEmitter {
 
       this.instrumentationLogger.resetContext();
 
-      // Reset target instrumentation manager to clear session-specific options
-      // (e.g. dangerous logging flags) so they don't leak into the idle browser
       this.targetInstrumentationManager = new TargetInstrumentationManager(
         this.instrumentationLogger,
         this.logger,
@@ -1483,8 +1248,7 @@ export class CDPService extends EventEmitter {
       }
     }
 
-    // Relaunch the idle browser (skip for scrape auto-release to free resources)
-    if (relaunchIdle) {
+    if (options?.relaunchIdle) {
       await this.launch(this.defaultLaunchConfig);
     }
   }
@@ -1492,8 +1256,6 @@ export class CDPService extends EventEmitter {
   private async onDisconnect(): Promise<void> {
     this.logger.info("Browser disconnected. Handling cleanup.");
 
-    // Always clear references. Do NOT auto-relaunch an idle browser —
-    // the next scrape/session will launch when needed.
     if (this.shuttingDown) {
       this.browserInstance = null;
       this.primaryPage = null as any;
@@ -1502,7 +1264,6 @@ export class CDPService extends EventEmitter {
 
     this.browserInstance = null;
     this.primaryPage = null as any;
-    // Optional external handler (e.g. session bookkeeping) — must not relaunch Chrome
     try {
       await this.disconnectHandler();
     } catch (err) {
@@ -1512,24 +1273,24 @@ export class CDPService extends EventEmitter {
 
   @traceable
   private async injectSessionContext(
-    page: Page,
+    page: PlaywrightPage,
     context?: BrowserLauncherOptions["sessionContext"],
   ) {
     if (!context) return;
 
-    const storageByOrigin = groupSessionStorageByOrigin(context);
+    const storageByOrigin = groupSessionStorageByOrigin(context as any);
 
     for (const origin of storageByOrigin.keys()) {
       this.trackedOrigins.add(origin);
     }
 
-    const client = await page.createCDPSession();
+    const client = await (page.context() as any).newCDPSession(page);
     try {
       if (context.cookies?.length) {
         await client.send("Network.setCookies", {
           cookies: context.cookies.map((cookie) => ({
             ...cookie,
-            partitionKey: cookie.partitionKey as unknown as Protocol.Network.Cookie["partitionKey"],
+            partitionKey: (cookie as any).partitionKey,
           })),
         });
         this.logger.info(`[CDPService] Set ${context.cookies.length} cookies`);
@@ -1543,143 +1304,19 @@ export class CDPService extends EventEmitter {
     this.logger.info(
       `[CDPService] Registered frame navigation handler for ${storageByOrigin.size} origins`,
     );
-    page.on("framenavigated", (frame) => handleFrameNavigated(frame, storageByOrigin, this.logger));
+    page.on("framenavigated", (frame) => handleFrameNavigated(frame as any, storageByOrigin, this.logger));
 
-    page.browser().on("targetcreated", async (target) => {
-      if (target.type() === "page") {
-        try {
-          const newPage = await target.page();
-          if (newPage) {
-            newPage.on("framenavigated", (frame) =>
-              handleFrameNavigated(frame, storageByOrigin, this.logger),
-            );
-          }
-        } catch (err) {
-          this.logger.error(`[CDPService] Error adding framenavigated handler to new page: ${err}`);
-        }
+    page.context().on("page", (newPage: PlaywrightPage) => {
+      try {
+        newPage.on("framenavigated", (frame) =>
+          handleFrameNavigated(frame as any, storageByOrigin, this.logger),
+        );
+      } catch (err) {
+        this.logger.error(`[CDPService] Error adding framenavigated handler to new page: ${err}`);
       }
     });
 
     this.logger.debug("[CDPService] Session context injection setup complete");
-  }
-
-  @traceable
-  private async injectFingerprintSafely(
-    page: Page,
-    fingerprintData: BrowserFingerprintWithHeaders | null,
-  ) {
-    if (!fingerprintData) return;
-
-    try {
-      const { fingerprint, headers } = fingerprintData;
-      // TypeScript fix - access userAgent through navigator property
-      const userAgent = fingerprint.navigator.userAgent;
-      const userAgentMetadata = fingerprint.navigator.userAgentData;
-
-      await page.setUserAgent(userAgent);
-
-      const session = await page.createCDPSession();
-
-      try {
-        const injectedHeaders = filterHeaders(headers);
-
-        await page.setExtraHTTPHeaders(injectedHeaders);
-
-        await session.send("Emulation.setUserAgentOverride", {
-          userAgent: userAgent,
-          acceptLanguage: headers["accept-language"],
-          platform: userAgentMetadata.platform || fingerprint.navigator.platform || "Linux x86_64",
-          userAgentMetadata: {
-            brands:
-              userAgentMetadata.brands as unknown as Protocol.Emulation.UserAgentMetadata["brands"],
-            fullVersionList:
-              userAgentMetadata.fullVersionList as unknown as Protocol.Emulation.UserAgentMetadata["fullVersionList"],
-            fullVersion: userAgentMetadata.uaFullVersion,
-            platform:
-              userAgentMetadata.platform || fingerprint.navigator.platform || "Linux x86_64",
-            platformVersion: userAgentMetadata.platformVersion || "",
-            architecture: userAgentMetadata.architecture || "x86",
-            model: userAgentMetadata.model || "",
-            mobile: userAgentMetadata.mobile as unknown as boolean,
-            bitness: userAgentMetadata.bitness || "64",
-            wow64: false, // wow64 property doesn't exist on UserAgentData, defaulting to false
-          },
-        });
-      } finally {
-        // Always detach the session when done
-        await session.detach().catch(() => {});
-      }
-
-      await page.evaluateOnNewDocument(
-        loadFingerprintScript({
-          fixedPlatform: fingerprint.navigator.platform || "Linux x86_64",
-          fixedVendor: (fingerprint.videoCard as VideoCard | null)?.vendor,
-          fixedRenderer: (fingerprint.videoCard as VideoCard | null)?.renderer,
-          fixedDeviceMemory: fingerprint.navigator.deviceMemory || 8,
-          fixedHardwareConcurrency: fingerprint.navigator.hardwareConcurrency || 8,
-          fixedArchitecture: userAgentMetadata.architecture || "x86",
-          fixedBitness: userAgentMetadata.bitness || "64",
-          fixedModel: userAgentMetadata.model || "",
-          fixedPlatformVersion: userAgentMetadata.platformVersion || "15.0.0",
-          fixedUaFullVersion: userAgentMetadata.uaFullVersion || "131.0.6778.86",
-          fixedBrands:
-            userAgentMetadata.brands ||
-            ([] as unknown as Array<{
-              brand: string;
-              version: string;
-            }>),
-        }),
-      );
-    } catch (error) {
-      if (isTargetClosedError(error) || page.isClosed()) {
-        this.logger.debug({ err: error }, "[Fingerprint] Skipping injection; target closed");
-        return;
-      }
-      this.logger.error({ error }, `[Fingerprint] Error injecting fingerprint safely`);
-      const fingerprintInjector = new FingerprintInjector();
-      // @ts-ignore - Ignore type mismatch between puppeteer versions
-      await fingerprintInjector.attachFingerprintToPuppeteer(page, fingerprintData);
-    }
-  }
-
-  @traceable
-  private async applyDeviceMetricsOverride(page: Page): Promise<void> {
-    const screen = this.fingerprintData?.fingerprint?.screen;
-    if (!screen) {
-      this.logger.warn(
-        "[CDPService] No fingerprint screen data available, skipping Page.setDeviceMetricsOverride",
-      );
-      return;
-    }
-
-    const userAgent = this.getUserAgent() ?? "";
-    const session = await page.createCDPSession();
-    try {
-      await session.send("Page.setDeviceMetricsOverride", {
-        screenWidth: screen.width,
-        screenHeight: screen.height,
-        width: screen.width,
-        height: screen.height,
-        mobile: /phone|android|mobile/i.test(userAgent),
-        screenOrientation:
-          screen.height > screen.width
-            ? { angle: 0, type: "portraitPrimary" }
-            : { angle: 90, type: "landscapePrimary" },
-        deviceScaleFactor: screen.devicePixelRatio,
-      });
-
-      if (/phone|android|mobile/i.test(userAgent)) {
-        const maxTouchPoints =
-          (this.fingerprintData?.fingerprint.navigator as { maxTouchPoints?: number })
-            .maxTouchPoints ?? 1;
-        await session.send("Emulation.setTouchEmulationEnabled", {
-          enabled: true,
-          maxTouchPoints,
-        });
-      }
-    } finally {
-      await session.detach().catch(() => {});
-    }
   }
 
   @traceable

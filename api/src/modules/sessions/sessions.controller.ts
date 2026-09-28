@@ -16,21 +16,21 @@ export const handleLaunchBrowserSession = async (
       proxyUrl,
       userDataDir,
       persist,
-      userAgent,
       sessionContext,
-      extensions,
+      sessionExtensions,
       logSinkUrl,
       timezone,
       dimensions,
-      isSelenium,
       blockAds,
       optimizeBandwidth,
       extra,
       credentials,
-      skipFingerprintInjection,
       userPreferences,
       deviceConfig,
-      headless,
+      fullscreen,
+      dangerouslyLogRequestDetails,
+      captureWorkerNetwork,
+      caCertificates,
     } = request.body;
 
     return await server.sessionService.startSession({
@@ -38,27 +38,27 @@ export const handleLaunchBrowserSession = async (
       proxyUrl,
       userDataDir,
       persist,
-      userAgent,
       sessionContext: sessionContext as {
         cookies?: CookieData[] | undefined;
         localStorage?: Record<string, Record<string, any>> | undefined;
       },
-      extensions,
+      sessionExtensions,
       logSinkUrl,
       timezone,
       dimensions,
-      isSelenium,
       blockAds,
       optimizeBandwidth,
-      extra,
+      extra: extra as Record<string, unknown> | undefined,
       credentials,
-      skipFingerprintInjection,
       userPreferences,
       deviceConfig,
-      headless,
+      fullscreen,
+      dangerouslyLogRequestDetails,
+      captureWorkerNetwork,
+      caCertificates,
     });
   } catch (e: unknown) {
-    server.log.error({ err: e }, "Failed lauching browser session");
+    server.log.error({ err: e }, "Failed launching browser session");
     const error = getErrors(e);
     return reply.code(500).send({ success: false, message: error });
   }
@@ -97,7 +97,10 @@ export const handleGetSessionDetails = async (
   const active = server.sessionService.activeSession;
 
   if (sessionId === active.id) {
-    const duration = new Date().getTime() - new Date(active.createdAt).getTime();
+    const duration =
+      active.status === "live"
+        ? new Date().getTime() - new Date(active.createdAt).getTime()
+        : active.duration;
     return reply.send({
       ...active,
       duration,
@@ -171,9 +174,9 @@ export const handleGetSessionLiveDetails = async (
     const pagesInfo = await Promise.all(
       pages.map(async (page) => {
         try {
-          const pageId = page.target()._targetId;
+          const pageId = await server.cdpService.getTargetId(page);
 
-          const title = await page.title();
+          const title = await page.title().catch(() => "");
 
           let favicon: string | null = null;
           try {

@@ -1,7 +1,6 @@
-import { randomUUID } from "crypto";
 import { execSync } from "node:child_process";
 import { FastifyReply } from "fastify";
-import { BrowserContext, Page, HTTPResponse } from "puppeteer-core";
+import { Page } from "patchright";
 import { CDPService } from "../../services/cdp/cdp.service.js";
 import { ShutdownReason } from "../../services/cdp/plugins/core/base-plugin.js";
 import { SessionService } from "../../services/session.service.js";
@@ -21,13 +20,101 @@ import { PDFRequest, ScrapeRequest, ScreenshotRequest, SearchRequest } from "./a
 import { DefuddleResponse } from "defuddle";
 import { buildHtmlLikeMetadataFromPdf, convertPdfWithMupdf } from "../../utils/scrape/pdfToHtml.js";
 import { safeGoto } from "../../utils/scrape/safeGoTo.js";
-import { waitForChallengeClear } from "../../utils/scrape/waitForChallenge.js";
-import { startSessionRecorder, type SessionRecorder } from "../../utils/scrape/page-recording.js";
+import {
+  waitForPageContent,
+  type WaitForContentResult,
+} from "../../utils/scrape/content-ready.js";
 import { scrapePool } from "../../utils/scrape/scrape-pool.js";
 
-async function closeEphemeralContext(context: BrowserContext | null): Promise<void> {
-  if (!context) return;
-  await context.close().catch(() => {});
+/**
+ * Every action funnels through one lifecycle:
+ *   ensureBrowser (headful patchright, all extensions auto-loaded)
+ *   -> promote to a live session (starts the recording)
+ *   -> do the work on the primary page
+ *   -> release the session (stops + flushes the recording)
+ */
+async function withScraperSession<T>(
+  sessionService: SessionService,
+  browserService: CDPService,
+  log: (msg: string) => void,
+  opts: { proxyUrl?: string | null; sessionExtensions?: string[] },
+  fn: (page: Page) => Promise<T>,
+): Promise<T> {
+  return scrapePool.run(async () => {
+    let proxy: IProxyServer | null = null;
+
+    try {
+      if (opts.proxyUrl) {
+        proxy = await sessionService.proxyFactory(opts.proxyUrl);
+        await proxy.listen();
+      }
+
+      // Fresh headful Chrome per job. Never run work under the idle placeholder.
+      const session = await sessionService.startSession({
+        proxyUrl: proxy?.url ?? undefined,
+        sessionExtensions: opts.sessionExtensions,
+      });
+
+      await browserService.ensureBrowser({
+        options: { proxyUrl: proxy?.url },
+        blockAds: false,
+        extensions: opts.sessionExtensions,
+      });
+
+      const page = await browserService.getPrimaryPage();
+      const result = await fn(page);
+
+      // Release marks status=released with the real elapsed duration and
+      // flushes this session's video recording.
+      const released = await sessionService.endSession({ relaunchIdle: false });
+      log(`[scrape] session ${released.id} released after ${released.duration}ms`);
+
+      return result;
+    } finally {
+      if (proxy) {
+        await proxy.close(true).catch(() => {});
+      }
+      // Belt-and-braces: if startSession threw, make sure nothing is left over.
+      try {
+        if (sessionService.activeSession.status === "live") {
+          await sessionService.endSession({ relaunchIdle: false });
+        }
+      } catch {
+        await browserService.shutdown(ShutdownReason.SESSION_END).catch(() => {});
+      }
+      try {
+        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
+      } catch {}
+    }
+  });
+}
+
+async function startRecording(
+  sessionService: SessionService,
+  request: { log: { warn: (obj: any, msg: string) => void } },
+): Promise<void> {
+  try {
+    const { startSessionRecorder } = await import("../../utils/scrape/page-recording.js");
+    const sid = sessionService.activeSession?.id;
+    if (sid) {
+      const recorder = await startSessionRecorder(null, sid);
+      if (recorder) {
+        (sessionService.activeSession as any).__recorder = recorder;
+      }
+    }
+  } catch (err) {
+    request.log.warn({ err }, "startSessionRecorder failed");
+  }
+}
+
+async function stopRecording(sessionService: SessionService): Promise<void> {
+  try {
+    const recorder = (sessionService.activeSession as any).__recorder;
+    if (recorder) {
+      (sessionService.activeSession as any).__recorder = null;
+      await recorder.stop();
+    }
+  } catch {}
 }
 
 export const handleScrape = async (
@@ -38,383 +125,301 @@ export const handleScrape = async (
 ) => {
   const startTime = Date.now();
   let times: Record<string, number> = {};
-  const { url, format, screenshot, pdf, proxyUrl, logUrl, delay, removeBase64Images } =
-    request.body;
+  const { url, format, screenshot, pdf, proxyUrl, logUrl, removeBase64Images } = request.body;
 
-  // Fresh Chrome per scrape job. Isolated context (not shared tabs on an idle browser).
-  // Always hard-shutdown when the job ends — never leave Chrome running.
-  return scrapePool.run(async () => {
-    let proxy: IProxyServer | null = null;
-    let sessionRecorder: SessionRecorder | null = null;
-    let context: BrowserContext | null = null;
+  try {
+    const response = await withScraperSession(
+      sessionService,
+      browserService,
+      (msg) => request.log.info(msg),
+      { proxyUrl },
+      async (page) => {
+        await startRecording(sessionService, request as any);
 
-    try {
-      if (proxyUrl) {
-        proxy = await sessionService.proxyFactory(proxyUrl);
-        await proxy.listen();
-      }
-      times.proxyTime = Date.now() - startTime;
-
-      // Promote this scrape to a real live session (new id). Never run work under the idle placeholder.
-      try {
-        Object.assign(sessionService.activeSession, {
-          id: randomUUID(),
-          status: "live",
-          createdAt: new Date().toISOString(),
-          duration: 0,
-          eventCount: 0,
-          proxy: proxyUrl || "",
-        });
-      } catch {}
-
-      let response: HTTPResponse | null = null;
-      let pdfResponse: HTTPResponse | null = null;
-
-      let page: Page | null = null;
-      if (browserService.isRunning()) {
-        try {
-          await browserService.shutdown(ShutdownReason.SESSION_END);
-        } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 300));
-
-      await browserService.launch({
-        options: { headless: false },
-        skipFingerprintInjection: true,
-        blockAds: false,
-        extensions: ["nopecha-bypass"],
-      });
-      // Proxy applied at context level (more reliable than --proxy-server for CF)
-      context = await browserService.createBrowserContext(proxy ? proxy.url : null);
-      page = await context.newPage();
-      if (!page) {
-        throw new Error("Browser instance not initialized");
-      }
-      // Full video of Xvfb display (ffmpeg x11grab) — no page injection
-      try {
-        const sid = sessionService.activeSession?.id;
-        if (sid) sessionRecorder = await startSessionRecorder(page, sid);
-      } catch (err) {
-        request.log.warn({ err }, "startSessionRecorder failed");
-      }
-      // Capture real UA for session details / list
-      try {
-        const ua =
-          (await page.evaluate(() => navigator.userAgent).catch(() => null)) ||
-          browserService.getUserAgent?.() ||
-          "";
-        if (ua) {
-          Object.assign(sessionService.activeSession, { userAgent: ua });
+        let normalizedUrl: string | null = null;
+        if (url) {
+          normalizedUrl = normalizeUrl(url);
+          if (!normalizedUrl) {
+            throw new Error(`Invalid URL: ${url}`);
+          }
         }
-      } catch {}
-      times.pageTime = Date.now() - startTime - times.proxyTime;
 
-      // PDF retrieval will use node fetch with session cookies; removed CDP tracking
+        const navStart = Date.now();
+        const safeResponse = normalizedUrl
+          ? await safeGoto(page, normalizedUrl, {
+              timeout: 45000,
+              waitUntil: "domcontentloaded",
+            })
+          : { response: null, isPdf: false, pdfResponse: null };
+        times.pageLoadTime = Date.now() - navStart;
 
-      let normalizedUrl: string | null = null;
-      if (url) {
-        normalizedUrl = normalizeUrl(url);
-        if (!normalizedUrl) {
-          throw new Error(`Invalid URL: ${url}`);
+        const response0 = safeResponse.response ?? safeResponse.pdfResponse;
+        const isPdf = safeResponse.isPdf;
+        const contentType = response0?.headers()["content-type"]?.toLowerCase() || "";
+        const isJson = isJsonContentType(contentType);
+
+        // Automatic content-ready wait: challenges are detected and waited out
+        // (solved by the loaded extensions), and we finish the moment real
+        // content is parseable — no user-configured millisecond delay.
+        let content: WaitForContentResult = {
+          ready: true,
+          challengeDetected: false,
+          challengeCleared: false,
+          waitedMs: 0,
+          snapshot: null,
+        };
+        if (!isPdf && !isJson) {
+          const contentStart = Date.now();
+          content = await waitForPageContent(page, {
+            timeoutMs: 60_000,
+            pollMs: 750,
+            log: (msg) => request.log.info(msg),
+          });
+          times.contentReadyWaitMs = content.waitedMs;
         }
-      }
+        times.challengeDetected = content.challengeDetected ? 1 : 0;
+        times.challengeCleared = content.challengeCleared ? 1 : 0;
 
-      const safeResponse = normalizedUrl
-        ? await safeGoto(page, normalizedUrl, {
-            timeout: 30000,
-            waitUntil: "domcontentloaded",
-          })
-        : { response: null, isPdf: false, pdfResponse: null };
+        let scrapeResponse: Record<string, any> = {};
+        let htmlContent = "";
+        let cleanedHtml: string;
+        let readabilityContent: DefuddleResponse;
 
-      response = safeResponse.response !== null ? safeResponse.response : safeResponse.pdfResponse;
-      pdfResponse = safeResponse.pdfResponse;
-      const isPdf = safeResponse.isPdf;
+        if (isPdf || contentType.includes("application/pdf")) {
+          // Node fetch using session cookies (same browser auth state)
+          const targetUrl = normalizedUrl || url!;
+          const cookies = await page.context().cookies(targetUrl);
+          const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+          const fetchHeaders: Record<string, string> = {};
+          if (cookieHeader) fetchHeaders["Cookie"] = cookieHeader;
+          if (!fetchHeaders["Referer"]) {
+            const u = new URL(targetUrl);
+            fetchHeaders["Referer"] = u.origin + "/";
+          }
+          const nodeRes = await fetch(targetUrl, {
+            method: "GET",
+            redirect: "follow",
+            headers: fetchHeaders,
+          });
+          const nodeCT = (nodeRes.headers.get("content-type") || "").toLowerCase();
+          if (!nodeRes.ok || !nodeCT.includes("application/pdf")) {
+            throw new Error(`Expected PDF; got status ${nodeRes.status} content-type ${nodeCT}`);
+          }
+          const arrBuf = await nodeRes.arrayBuffer();
+          const pdfBuffer = Buffer.from(arrBuf);
 
-      if (delay) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
+          const convertStart = Date.now();
+          const { html, links, meta } = convertPdfWithMupdf(pdfBuffer);
+          htmlContent = html;
+          times.pdfHtmlConvertTime = Date.now() - convertStart;
 
-      // Wait for Cloudflare / Turnstile / similar interstitials to clear.
-      // Extensions like NopeCHA solve captchas in-page; request interception is
-      // disabled by default so Turnstile workers can load.
-      const challengeTimeout = Math.max(delay || 0, 45_000);
-      let challengeResult = { waitedMs: 0, cleared: false };
-      try {
-        challengeResult = await waitForChallengeClear(page, {
-          timeoutMs: challengeTimeout,
-          pollMs: 1500,
-          log: (msg) => request.log.info(msg),
-        });
-      } catch (err) {
-        request.log.warn({ err }, "waitForChallengeClear failed (page may have navigated)");
-      }
-      times.challengeWaitMs = challengeResult.waitedMs;
-      times.challengeCleared = challengeResult.cleared ? 1 : 0;
-
-      const contentType = response?.headers()["content-type"]?.toLowerCase() || "";
-      const isJson = isJsonContentType(contentType);
-
-      let scrapeResponse: Record<string, any> = {};
-      let htmlContent = "";
-      let cleanedHtml: string;
-      let readabilityContent: DefuddleResponse;
-
-      if (isPdf || contentType.includes("application/pdf")) {
-        // Node fetch using session cookies (same browser auth state)
-        const targetUrl = normalizedUrl || url!;
-        const cookies = await page.cookies(targetUrl);
-        const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-        const fetchHeaders: Record<string, string> = {};
-        if (cookieHeader) fetchHeaders["Cookie"] = cookieHeader;
-        if (!fetchHeaders["Referer"]) {
-          const u = new URL(targetUrl);
-          fetchHeaders["Referer"] = u.origin + "/";
-        }
-        const nodeRes = await fetch(targetUrl, {
-          method: "GET",
-          redirect: "follow",
-          headers: fetchHeaders,
-        });
-        const nodeCT = (nodeRes.headers.get("content-type") || "").toLowerCase();
-        if (!nodeRes.ok || !nodeCT.includes("application/pdf")) {
-          throw new Error(`Expected PDF; got status ${nodeRes.status} content-type ${nodeCT}`);
-        }
-        const arrBuf = await nodeRes.arrayBuffer();
-        const pdfBuffer = Buffer.from(arrBuf);
-
-        const convertStart = Date.now();
-        const { html, links, meta } = convertPdfWithMupdf(pdfBuffer);
-        htmlContent = html;
-        times.pdfHtmlConvertTime = Date.now() - convertStart;
-
-        const htmlMeta = buildHtmlLikeMetadataFromPdf(meta, {
-          urlSource: targetUrl,
-          statusCode: nodeRes.status,
-          htmlForFallback: htmlContent,
-        });
-
-        const htmlLinks = links;
-
-        scrapeResponse = {
-          content: {},
-          metadata: {
-            ...htmlMeta,
+          const htmlMeta = buildHtmlLikeMetadataFromPdf(meta, {
+            urlSource: targetUrl,
             statusCode: nodeRes.status,
-            headers: Object.fromEntries(nodeRes.headers.entries()),
-            originalContentType: nodeCT,
-            pdfAcquisition: "node-fetch-with-cookies",
-          },
-          links: htmlLinks,
-        };
+            htmlForFallback: htmlContent,
+          });
 
-        if (pdf) {
-          scrapeResponse.pdf = pdfBuffer.toString("base64");
+          scrapeResponse = {
+            content: {},
+            metadata: {
+              ...htmlMeta,
+              statusCode: nodeRes.status,
+              headers: Object.fromEntries(nodeRes.headers.entries()),
+              originalContentType: nodeCT,
+              pdfAcquisition: "node-fetch-with-cookies",
+            },
+            links,
+          };
+
+          if (pdf) {
+            scrapeResponse.pdf = pdfBuffer.toString("base64");
+          }
+        } else if (isJson) {
+          let rawJson = "";
+          try {
+            rawJson = (await response0?.text()) ?? "";
+          } catch {
+            rawJson = "";
+          }
+          htmlContent = rawJson;
+
+          const [base64Screenshot, pdfBuffer] = await Promise.all([
+            screenshot
+              ? page.screenshot({ type: "jpeg", quality: 100 } as any).then((b) => b.toString("base64"))
+              : null,
+            pdf ? page.pdf().then((b) => b.toString("base64")) : null,
+          ]);
+
+          scrapeResponse = {
+            content: {},
+            metadata: {
+              urlSource: normalizedUrl || url,
+              timestamp: new Date().toISOString(),
+              originalContentType: contentType,
+              statusCode: response0?.status() ?? 200,
+            },
+            links: [],
+          };
+
+          if (base64Screenshot) {
+            scrapeResponse.screenshot = base64Screenshot;
+          }
+          if (pdfBuffer) {
+            scrapeResponse.pdf = pdfBuffer;
+          }
+        } else {
+          // Regular HTML flow
+          const [extracted, base64Screenshot, pdfBuffer] = await Promise.all([
+            page.evaluate(() => {
+              const getMetaContent = (selector: string) => {
+                const element = document.querySelector(selector);
+                return element ? element.getAttribute("content") : null;
+              };
+              const getMetaByName = (name: string) => getMetaContent(`meta[name="${name}"]`);
+              const getMetaByProperty = (property: string) =>
+                getMetaContent(`meta[property="${property}"]`);
+
+              const extractJsonLd = () => {
+                const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+                const jsonLdData: any[] = [];
+                scripts.forEach((script) => {
+                  try {
+                    const data = JSON.parse(script.textContent || "");
+                    jsonLdData.push(data);
+                  } catch (e) {
+                    console.error(e);
+                  }
+                });
+                return jsonLdData;
+              };
+
+              return {
+                html: document.documentElement.outerHTML,
+                links: [...document.links].map((l) => ({
+                  url: l.href,
+                  text: l.textContent?.trim() || "",
+                })),
+                metadata: {
+                  title: document.title,
+                  language: document.documentElement.lang,
+                  urlSource: window.location.href,
+                  timestamp: new Date().toISOString(),
+
+                  description: getMetaByName("description"),
+                  keywords: getMetaByName("keywords"),
+                  author: getMetaByName("author"),
+
+                  ogTitle: getMetaByProperty("og:title"),
+                  ogDescription: getMetaByProperty("og:description"),
+                  ogImage: getMetaByProperty("og:image"),
+                  ogUrl: getMetaByProperty("og:url"),
+                  ogSiteName: getMetaByProperty("og:site_name"),
+
+                  articleAuthor: getMetaByProperty("article:author"),
+                  publishedTime: getMetaByProperty("article:published_time"),
+                  modifiedTime: getMetaByProperty("article:modified_time"),
+
+                  canonical: document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
+                  favicon: document.querySelector('link[rel="icon"]')?.getAttribute("href"),
+
+                  jsonLd: extractJsonLd(),
+                  statusCode: 200,
+                },
+              };
+            }),
+            screenshot
+              ? page.screenshot({ type: "jpeg", quality: 100 } as any).then((b) => b.toString("base64"))
+              : null,
+            pdf ? page.pdf().then((b) => b.toString("base64")) : null,
+          ]);
+
+          htmlContent = extracted.html;
+          times.extractionTime = Date.now() - startTime;
+
+          scrapeResponse = { content: {}, metadata: extracted.metadata, links: extracted.links };
+
+          if (base64Screenshot) {
+            scrapeResponse.screenshot = base64Screenshot;
+          }
+          if (pdfBuffer) {
+            scrapeResponse.pdf = pdfBuffer;
+          }
         }
-      } else if (isJson) {
-        let rawJson = "";
-        try {
-          rawJson = (await response?.text()) ?? "";
-        } catch {
-          rawJson = "";
-        }
-        htmlContent = rawJson;
 
-        const [base64Screenshot, pdfBuffer] = await Promise.all([
-          screenshot ? page.screenshot({ encoding: "base64", type: "jpeg", quality: 100 }) : null,
-          pdf ? page.pdf() : null,
-        ]);
+        // Format handling (works for both PDF converted HTML and normal HTML)
+        if (format && format.length > 0) {
+          if (format.includes(ScrapeFormat.HTML)) {
+            scrapeResponse.content.html = htmlContent;
+          }
 
-        scrapeResponse = {
-          content: {},
-          metadata: {
-            urlSource: normalizedUrl || url,
-            timestamp: new Date().toISOString(),
-            originalContentType: contentType,
-            statusCode: response?.status() ?? 200,
-          },
-          links: [],
-        };
+          const needsCleanedHtml = format.includes(ScrapeFormat.CLEANED_HTML);
+          const needsReadability =
+            format.includes(ScrapeFormat.READABILITY) || format.includes(ScrapeFormat.MARKDOWN);
 
-        if (base64Screenshot) {
-          scrapeResponse.screenshot = base64Screenshot;
-        }
-        if (pdfBuffer) {
-          scrapeResponse.pdf = Buffer.from(pdfBuffer).toString("base64");
-        }
-      } else {
-        // Regular HTML flow
-        await page.evaluate(() => {
-          (window as any).__name = (func: Function) => func;
-        });
+          if (needsCleanedHtml && !isJson) {
+            const cleanHtmlStart = Date.now();
+            cleanedHtml = cleanHtml(htmlContent);
+            times.cleanedHtmlTime = Date.now() - cleanHtmlStart;
 
-        const [{ html, metadata, links }, base64Screenshot, pdfBuffer] = await Promise.all([
-          page.evaluate(() => {
-            const getMetaContent = (selector: string) => {
-              const element = document.querySelector(selector);
-              return element ? element.getAttribute("content") : null;
-            };
-            const getMetaByName = (name: string) => getMetaContent(`meta[name="${name}"]`);
-            const getMetaByProperty = (property: string) =>
-              getMetaContent(`meta[property="${property}"]`);
+            if (format.includes(ScrapeFormat.CLEANED_HTML)) {
+              scrapeResponse.content.cleaned_html = cleanedHtml;
+            }
+          }
 
-            const extractJsonLd = () => {
-              const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-              const jsonLdData: any[] = [];
-              scripts.forEach((script) => {
-                try {
-                  const data = JSON.parse(script.textContent || "");
-                  jsonLdData.push(data);
-                } catch (e) {
-                  console.error(e);
-                }
-              });
-              return jsonLdData;
-            };
+          if (needsReadability && !isJson) {
+            const readabilityStart = Date.now();
+            readabilityContent = await getDefuddleContent(htmlContent, normalizedUrl || url);
+            times.readabilityTime = Date.now() - readabilityStart;
 
-            return {
-              html: document.documentElement.outerHTML,
-              links: [...document.links].map((l) => ({
-                url: l.href,
-                text: l.textContent?.trim() || "",
-              })),
-              metadata: {
-                title: document.title,
-                language: document.documentElement.lang,
-                urlSource: window.location.href,
-                timestamp: new Date().toISOString(),
+            scrapeResponse.metadata.author =
+              scrapeResponse.metadata.author || readabilityContent.author || null;
+            scrapeResponse.metadata.publishedTime =
+              scrapeResponse.metadata.publishedTime || readabilityContent.published || null;
+            scrapeResponse.metadata.wordCount = readabilityContent.wordCount;
 
-                description: getMetaByName("description"),
-                keywords: getMetaByName("keywords"),
-                author: getMetaByName("author"),
+            if (format.includes(ScrapeFormat.READABILITY)) {
+              scrapeResponse.content.readability = readabilityContent.content;
+            }
+          }
 
-                ogTitle: getMetaByProperty("og:title"),
-                ogDescription: getMetaByProperty("og:description"),
-                ogImage: getMetaByProperty("og:image"),
-                ogUrl: getMetaByProperty("og:url"),
-                ogSiteName: getMetaByProperty("og:site_name"),
-
-                articleAuthor: getMetaByProperty("article:author"),
-                publishedTime: getMetaByProperty("article:published_time"),
-                modifiedTime: getMetaByProperty("article:modified_time"),
-
-                canonical: document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
-                favicon: document.querySelector('link[rel="icon"]')?.getAttribute("href"),
-
-                jsonLd: extractJsonLd(),
-                statusCode: 200,
-              },
-            };
-          }),
-          screenshot ? page.screenshot({ encoding: "base64", type: "jpeg", quality: 100 }) : null,
-          pdf ? page.pdf() : null,
-        ]);
-
-        htmlContent = html;
-        times.extractionTime = Date.now() - startTime - (times.pageLoadTime || 0);
-
-        scrapeResponse = { content: {}, metadata, links };
-
-        if (base64Screenshot) {
-          scrapeResponse.screenshot = base64Screenshot;
-        }
-        if (pdfBuffer) {
-          scrapeResponse.pdf = Buffer.from(pdfBuffer).toString("base64");
-        }
-      }
-
-      // Format handling (works for both PDF converted HTML and normal HTML)
-      if (format && format.length > 0) {
-        if (format.includes(ScrapeFormat.HTML)) {
+          if (format.includes(ScrapeFormat.MARKDOWN)) {
+            const markdownStart = Date.now();
+            if (isJson) {
+              scrapeResponse.content.markdown = jsonToMarkdown(htmlContent);
+            } else {
+              let markdown = readabilityContent!.contentMarkdown ?? "";
+              if (removeBase64Images) {
+                markdown = stripBase64Images(markdown);
+              }
+              scrapeResponse.content.markdown = markdown;
+            }
+            times.markdownTime = Date.now() - markdownStart;
+          }
+        } else {
           scrapeResponse.content.html = htmlContent;
         }
 
-        const needsCleanedHtml = format.includes(ScrapeFormat.CLEANED_HTML);
-        const needsReadability =
-          format.includes(ScrapeFormat.READABILITY) || format.includes(ScrapeFormat.MARKDOWN);
+        await stopRecording(sessionService);
+        times.totalInstanceTime = Date.now() - startTime;
 
-        if (needsCleanedHtml && !isJson) {
-          const cleanHtmlStart = Date.now();
-          cleanedHtml = cleanHtml(htmlContent);
-          times.cleanedHtmlTime = Date.now() - cleanHtmlStart;
+        return scrapeResponse;
+      },
+    );
 
-          if (format.includes(ScrapeFormat.CLEANED_HTML)) {
-            scrapeResponse.content.cleaned_html = cleanedHtml;
-          }
-        }
-
-        if (needsReadability && !isJson) {
-          const readabilityStart = Date.now();
-          readabilityContent = await getDefuddleContent(htmlContent, normalizedUrl || url);
-          times.readabilityTime = Date.now() - readabilityStart;
-
-          scrapeResponse.metadata.author =
-            scrapeResponse.metadata.author || readabilityContent.author || null;
-          scrapeResponse.metadata.publishedTime =
-            scrapeResponse.metadata.publishedTime || readabilityContent.published || null;
-          scrapeResponse.metadata.wordCount = readabilityContent.wordCount;
-
-          if (format.includes(ScrapeFormat.READABILITY)) {
-            scrapeResponse.content.readability = readabilityContent.content;
-          }
-        }
-
-        if (format.includes(ScrapeFormat.MARKDOWN)) {
-          const markdownStart = Date.now();
-          if (isJson) {
-            scrapeResponse.content.markdown = jsonToMarkdown(htmlContent);
-          } else {
-            let markdown = readabilityContent!.contentMarkdown ?? "";
-            if (removeBase64Images) {
-              markdown = stripBase64Images(markdown);
-            }
-            scrapeResponse.content.markdown = markdown;
-          }
-          times.markdownTime = Date.now() - markdownStart;
-        }
-      } else {
-        scrapeResponse.content.html = htmlContent;
-      }
-
-      times.totalInstanceTime = Date.now() - startTime;
-
-      if (logUrl) {
-        await updateLog(logUrl, { times });
-      }
-
-      return reply.send(scrapeResponse);
-    } catch (e: unknown) {
-      const error = getErrors(e);
-
-      if (logUrl) {
-        await updateLog(logUrl, { times, response: { browserError: error } });
-      }
-
-      return reply.code(500).send({ message: error });
-    } finally {
-      // Stop screencast BEFORE closing page/browser so frames are flushed + encoded
-      try {
-        if (sessionRecorder) {
-          await sessionRecorder.stop();
-          sessionRecorder = null;
-        }
-      } catch (err) {
-        request.log.warn({ err }, "sessionRecorder.stop failed");
-      }
-      await closeEphemeralContext(context);
-      if (proxy) {
-        await proxy.close(true).catch(() => {});
-      }
-      // Always hard-stop Chrome after this scrape. No idle session / leftover tabs.
-      try {
-        await sessionService.endSession({ relaunchIdle: false });
-      } catch {
-        await browserService.shutdown(ShutdownReason.SESSION_END).catch(() => {});
-      }
-      try {
-        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
-      } catch {}
+    if (logUrl) {
+      await updateLog(logUrl, { times });
     }
-  });
+
+    return reply.send(response);
+  } catch (e: unknown) {
+    const error = getErrors(e);
+
+    if (logUrl) {
+      await updateLog(logUrl, { times, response: { browserError: error } });
+    }
+
+    return reply.code(500).send({ message: error });
+  }
 };
 
 export const handleSearch = async (
@@ -427,85 +432,63 @@ export const handleSearch = async (
   let times: Record<string, number> = {};
   const { query, proxyUrl, logUrl } = request.body;
 
-  let proxy: IProxyServer | null = null;
-  let context: BrowserContext | null = null;
-
   try {
-    if (proxyUrl) {
-      proxy = await sessionService.proxyFactory(proxyUrl);
-      await proxy.listen();
-    }
-    times.proxyTime = Date.now() - startTime;
+    const results = await withScraperSession(
+      sessionService,
+      browserService,
+      (msg) => request.log.info(msg),
+      { proxyUrl },
+      async (page) => {
+        // Go to Brave
+        await page.goto(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, {
+          waitUntil: "domcontentloaded",
+        });
 
-    let page: Page;
+        await page.waitForSelector("#results", { timeout: 15000 }).catch(() => {});
 
-    if (!browserService.isRunning()) {
-      await browserService.launch();
-    }
+        // Scrape results
+        const results = await page.evaluate(() => {
+          const items = document.querySelectorAll("div.snippet");
 
-    if (proxy) {
-      // If a proxy is used, we proceed with browser navigation; implementing proxy-aware Node fetch
-      // would require an HTTP agent and is outside current scope.
-      context = await browserService.createBrowserContext(proxy.url);
-      page = await context.newPage();
-      times.proxyPageTime = Date.now() - startTime - times.proxyTime;
-    } else {
-      page = await browserService.getPrimaryPage();
-      times.pageTime = Date.now() - startTime - times.proxyTime;
-    }
+          return Array.from(items)
+            .map((item) => {
+              if (
+                [
+                  "llm-snippet",
+                  "faq",
+                  "pagination-snippet",
+                  "search-elsewhere",
+                  "infoblox-snippet",
+                  "discussions",
+                ].includes(item.id)
+              ) {
+                return;
+              }
+              const urlEl = item.querySelector("div.result-content a");
+              const descEl = item.querySelector("div.generic-snippet");
+              const titleEl = item.querySelector("div.result-content a div.title");
 
-    await page.evaluate(() => {
-      (window as any).__name = (func: Function) => func;
-    });
-
-    // Go to Brave
-    await page.goto(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, {
-      waitUntil: "networkidle2",
-    });
-
-    // Wait for results to load
-    await page.waitForSelector("#results");
-
-    // Scrape results
-    const results = await page.evaluate(() => {
-      const items = document.querySelectorAll("div.snippet");
-
-      return Array.from(items)
-        .map((item) => {
-          if (
-            [
-              "llm-snippet",
-              "faq",
-              "pagination-snippet",
-              "search-elsewhere",
-              "infoblox-snippet",
-              "discussions",
-            ].includes(item.id)
-          ) {
-            return;
-          }
-          const urlEl = item.querySelector("div.result-content a");
-          const descEl = item.querySelector("div.generic-snippet");
-          const titleEl = item.querySelector("div.result-content a div.title");
-
-          return {
-            title: titleEl?.textContent?.trim() || null,
-            url: urlEl?.getAttribute("href") || null,
-            description: descEl?.textContent?.split("-")[1]?.trim() || null,
-          };
-        })
-        .filter(
-          (item) =>
-            item &&
-            typeof item === "object" &&
-            "title" in item &&
-            "url" in item &&
-            "description" in item &&
-            item.title !== null &&
-            item.url !== null,
-        );
-    });
-    times.totalInstanceTime = Date.now() - startTime;
+              return {
+                title: titleEl?.textContent?.trim() || null,
+                url: urlEl?.getAttribute("href") || null,
+                description: descEl?.textContent?.split("-")[1]?.trim() || null,
+              };
+            })
+            .filter(
+              (item) =>
+                item &&
+                typeof item === "object" &&
+                "title" in item &&
+                "url" in item &&
+                "description" in item &&
+                item.title !== null &&
+                item.url !== null,
+            );
+        });
+        times.totalInstanceTime = Date.now() - startTime;
+        return results;
+      },
+    );
 
     if (logUrl) {
       await updateLog(logUrl, { times });
@@ -520,11 +503,6 @@ export const handleSearch = async (
     }
 
     return reply.code(500).send({ message: error });
-  } finally {
-    await closeEphemeralContext(context);
-    if (proxy) {
-      await proxy.close(true).catch(() => {});
-    }
   }
 };
 
@@ -536,50 +514,35 @@ export const handleScreenshot = async (
 ) => {
   const startTime = Date.now();
   let times: Record<string, number> = {};
-  const { url, logUrl, proxyUrl, delay, fullPage } = request.body;
-
-  let proxy: IProxyServer | null = null;
-  let context: BrowserContext | null = null;
-
-  if (!browserService.isRunning()) {
-    await browserService.launch();
-  }
+  const { url, logUrl, proxyUrl, fullPage } = request.body;
 
   try {
-    if (proxyUrl) {
-      proxy = await sessionService.proxyFactory(proxyUrl);
-      await proxy.listen();
-    }
+    const screenshot = await withScraperSession(
+      sessionService,
+      browserService,
+      (msg) => request.log.info(msg),
+      { proxyUrl },
+      async (page) => {
+        await startRecording(sessionService, request as any);
 
-    times.proxyTime = Date.now() - startTime;
+        if (url) {
+          const normalizedUrl = normalizeUrl(url);
+          if (!normalizedUrl) {
+            throw new Error(`Invalid URL: ${url}`);
+          }
+          await page.goto(normalizedUrl, { timeout: 45000, waitUntil: "domcontentloaded" });
+          // Automatic readiness — no fixed delay.
+          const content = await waitForPageContent(page, { timeoutMs: 30_000, pollMs: 750 });
+          times.contentReadyWaitMs = content.waitedMs;
+        }
 
-    let page: Page;
+        const screenshot = await page.screenshot({ fullPage, type: "jpeg", quality: 100 } as any);
+        times.totalInstanceTime = Date.now() - startTime;
 
-    if (proxy) {
-      context = await browserService.createBrowserContext(proxy.url);
-      page = await context.newPage();
-      times.proxyPageTime = Date.now() - startTime - times.proxyTime;
-    } else {
-      page = await browserService.getPrimaryPage();
-      times.pageTime = Date.now() - startTime;
-    }
-
-    if (url) {
-      const normalizedUrl = normalizeUrl(url);
-      if (!normalizedUrl) {
-        throw new Error(`Invalid URL: ${url}`);
-      }
-      await page.goto(normalizedUrl, { timeout: 30000, waitUntil: "domcontentloaded" });
-      times.pageLoadTime = Date.now() - times.pageTime - times.proxyTime - startTime;
-    }
-
-    if (delay) {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-
-    const screenshot = await page.screenshot({ fullPage, type: "jpeg", quality: 100 });
-    times.screenshotTime =
-      Date.now() - times.pageLoadTime - times.pageTime - times.proxyTime - startTime;
+        await stopRecording(sessionService);
+        return screenshot;
+      },
+    );
 
     if (logUrl) {
       await updateLog(logUrl, { times });
@@ -593,16 +556,7 @@ export const handleScreenshot = async (
       await updateLog(logUrl, { times, response: { browserError: error } });
     }
 
-    if (url) {
-      await browserService.refreshPrimaryPage();
-    }
-
     return reply.code(500).send({ message: error });
-  } finally {
-    await closeEphemeralContext(context);
-    if (proxy) {
-      await proxy.close(true).catch(() => {});
-    }
   }
 };
 
@@ -614,49 +568,30 @@ export const handlePDF = async (
 ) => {
   const startTime = Date.now();
   let times: Record<string, number> = {};
-  const { url, logUrl, proxyUrl, delay } = request.body;
-
-  let proxy: IProxyServer | null = null;
-  let context: BrowserContext | null = null;
-
-  if (!browserService.isRunning()) {
-    await browserService.launch();
-  }
+  const { url, logUrl, proxyUrl } = request.body;
 
   try {
-    if (proxyUrl) {
-      proxy = await sessionService.proxyFactory(proxyUrl);
-      await proxy.listen();
-    }
+    const pdf = await withScraperSession(
+      sessionService,
+      browserService,
+      (msg) => request.log.info(msg),
+      { proxyUrl },
+      async (page) => {
+        if (url) {
+          const normalizedUrl = normalizeUrl(url);
+          if (!normalizedUrl) {
+            throw new Error(`Invalid URL: ${url}`);
+          }
+          await page.goto(normalizedUrl, { timeout: 45000, waitUntil: "domcontentloaded" });
+          const content = await waitForPageContent(page, { timeoutMs: 30_000, pollMs: 750 });
+          times.contentReadyWaitMs = content.waitedMs;
+        }
 
-    times.proxyTime = Date.now() - startTime;
-
-    let page: Page;
-
-    if (proxy) {
-      context = await browserService.createBrowserContext(proxy.url);
-      page = await context.newPage();
-      times.proxyPageTime = Date.now() - startTime - times.proxyTime;
-    } else {
-      page = await browserService.getPrimaryPage();
-      times.pageTime = Date.now() - startTime;
-    }
-
-    if (url) {
-      const normalizedUrl = normalizeUrl(url);
-      if (!normalizedUrl) {
-        throw new Error(`Invalid URL: ${url}`);
-      }
-      await page.goto(normalizedUrl, { timeout: 30000, waitUntil: "domcontentloaded" });
-      times.pageLoadTime = Date.now() - times.pageTime - times.proxyTime - startTime;
-    }
-
-    if (delay) {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-
-    const pdf = await page.pdf();
-    times.pdfTime = Date.now() - times.pageLoadTime - times.pageTime - times.proxyTime - startTime;
+        const pdf = await page.pdf();
+        times.totalInstanceTime = Date.now() - startTime;
+        return pdf;
+      },
+    );
 
     if (logUrl) {
       await updateLog(logUrl, { times });
@@ -670,15 +605,6 @@ export const handlePDF = async (
       await updateLog(logUrl, { times, response: { browserError: error } });
     }
 
-    if (url) {
-      await browserService.refreshPrimaryPage();
-    }
-
     return reply.code(500).send({ message: error });
-  } finally {
-    await closeEphemeralContext(context);
-    if (proxy) {
-      await proxy.close(true).catch(() => {});
-    }
   }
 };

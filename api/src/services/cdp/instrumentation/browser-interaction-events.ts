@@ -1,4 +1,5 @@
-import type { CDPSession, Page, TargetType } from "puppeteer-core";
+import type { CDPSession, Page } from "patchright";
+import type { TargetType } from "./pw-types.js";
 import { BrowserEventType } from "../../../types/index.js";
 import type { BrowserLogger } from "./browser-logger.js";
 import { createBrowserInteractionScript } from "./browser-interaction-script.js";

@@ -111,8 +111,6 @@ export default function SessionDetails({ id }: { id: string | null }) {
       </div>
       <Feature label="Captcha solver (NopeCHA)" on={true} />
       <Feature label="Proxy" on={!!session.proxy} />
-      <Feature label="Selenium" on={!!session.isSelenium} />
-      <Feature label="Auto-captcha flag" on={!!session.solveCaptcha} />
       <Feature label="Video recording" on={session.status !== "live"} />
 
       {session.status === "live" && (

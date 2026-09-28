@@ -1,21 +1,19 @@
-import puppeteer from "puppeteer-core";
+import { chromium } from "patchright";
 
 async function run() {
-  // WebSocket endpoint to connect Browser using Chrome DevTools Protocol (CDP)
-  const wsEndpoint = "ws://0.0.0.0:3000";
-  const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
-  
+  // Attach to the Steel browser over its CDP endpoint.
+  // The headful browser starts automatically when a session or scrape runs.
+  const cdpEndpoint = "http://127.0.0.1:9222";
+  const browser = await chromium.connectOverCDP(cdpEndpoint);
+  const context = browser.contexts()[0] ?? (await browser.newContext());
+  const page = await context.newPage();
+
   try {
-    const page = await browser.newPage();
-
-    // Navigate to a website and log the title
     await page.goto("https://steel.dev");
-
     console.log(`Page title: ${await page.title()}`);
   } finally {
-    // Cleanup: close all pages and disconnect browser
-    await Promise.all((await browser.pages()).map((p) => p.close()));
-    await browser.disconnect();  
+    await page.close();
+    await browser.close(); // disconnects without killing the browser
   }
 }
 

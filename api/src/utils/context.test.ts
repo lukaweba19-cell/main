@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { FastifyBaseLogger } from "fastify";
-import type { Page } from "puppeteer-core";
+import type { Page } from "patchright";
 import { extractStorageForPageWithTimeout, safePageUrl } from "./context.js";
 
 const logger = () =>
@@ -16,8 +16,8 @@ const logger = () =>
 const unresponsivePage = (url = "https://example.com/report") =>
   ({
     url: () => url,
-    target: () => ({
-      createCDPSession: async () => ({
+    context: () => ({
+      newCDPSession: async () => ({
         send: () => new Promise(() => {}),
         detach: async () => {},
       }),
@@ -37,7 +37,7 @@ describe("extractStorageForPageWithTimeout", () => {
   it("does not reject, so one bad page cannot fail a release", async () => {
     const exploding = {
       url: () => "https://example.com",
-      target: () => {
+      context: () => {
         throw new Error("gone");
       },
     } as unknown as Page;
@@ -49,8 +49,8 @@ describe("extractStorageForPageWithTimeout", () => {
     const clearSpy = vi.spyOn(global, "clearTimeout");
     const page = {
       url: () => "https://example.com",
-      target: () => ({
-        createCDPSession: async () => ({
+      context: () => ({
+        newCDPSession: async () => ({
           send: async () => ({ frameTree: null }),
           detach: async () => {},
         }),

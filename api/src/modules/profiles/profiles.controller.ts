@@ -153,7 +153,6 @@ export class ProfilesController {
         projectId: parsed.projectId,
         proxyUrl: parsed.proxyUrl,
         useProxy: parsed.useProxy,
-        userAgent: parsed.userAgent,
       });
 
       await fs.promises.unlink(tempPath).catch(() => {});
@@ -220,7 +219,6 @@ export class ProfilesController {
           projectId: parsed.projectId,
           proxyUrl: parsed.proxyUrl,
           useProxy: parsed.useProxy,
-          userAgent: parsed.userAgent,
         },
         queryProjectId,
       );
