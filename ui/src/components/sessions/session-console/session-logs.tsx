@@ -14,16 +14,47 @@ function pick(obj: any, ...paths: string[]): any {
       }
       cur = cur[part];
     }
-    if (ok && cur != null && cur !== "") return cur;
+    // Only accept primitives — a picked object would stringify to
+    // "[object Object]" in the log line, which is what we're avoiding.
+    if (ok && cur != null && cur !== "" && (typeof cur !== "object" || cur instanceof Date)) {
+      return cur;
+    }
   }
   return undefined;
+}
+
+/** Compact, readable rendering of an arbitrary value for a log line. */
+function describe(value: any): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Error) return value.message;
+  try {
+    const s = JSON.stringify(value);
+    if (!s || s === "{}" || s === "[]") return "";
+    return s.length > 200 ? s.slice(0, 200) + "…" : s;
+  } catch {
+    return "";
+  }
 }
 
 function formatLogLine(type: string, log: Record<string, any>): string {
   const method = pick(log, "method", "request.method");
   const url = pick(log, "url", "request.url", "response.url", "navigation.url", "page.url");
   const status = pick(log, "status", "response.status");
-  const message = pick(log, "message", "text", "errorText", "error");
+  const message = describe(
+    pick(
+      log,
+      "message",
+      "text",
+      "errorText",
+      "failure.errorText",
+      "failureText",
+      "error.errorText",
+      "error.message",
+      "error",
+    ),
+  );
 
   if (type === "Console" || type === "Log") {
     const msg = message || JSON.stringify(log);
@@ -46,7 +77,7 @@ function formatLogLine(type: string, log: Record<string, any>): string {
     if (action) return String(action);
   }
   if (type === "Error" || type === "PageError" || type === "RequestFailed") {
-    return String(message || url || "error");
+    return message || describe(url) || (url ? String(url) : "request failed");
   }
   if (message) return String(message);
   if (url) return String(url);

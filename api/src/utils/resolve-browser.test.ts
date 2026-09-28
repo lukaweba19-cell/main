@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
+  BrowserNotFoundError,
   getCloakStealthArgs,
   resolveBrowser,
 } from "./resolve-browser.js";
@@ -14,19 +15,27 @@ beforeEach(() => {
   delete process.env.CLOAKBROWSER_EXECUTABLE_PATH;
   delete process.env.CLOAKBROWSER_CACHE_DIR;
   delete process.env.CLOAKBROWSER_LICENSE_KEY;
-  delete process.env.STEEL_DISABLE_CLOAKBROWSER;
-  delete process.env.CHROME_EXECUTABLE_PATH;
 });
 
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
 });
 
+function makeFakeCache(version: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloak-cache-"));
+  const binaryDir = path.join(dir, `chromium-${version}`);
+  fs.mkdirSync(binaryDir);
+  const binary = path.join(binaryDir, "chrome");
+  fs.writeFileSync(binary, "#!/bin/sh\n");
+  fs.chmodSync(binary, 0o755);
+  return dir;
+}
+
 describe("getCloakStealthArgs", () => {
-  it("includes the fingerprint-platform and no-sandbox flags", () => {
+  it("includes the linux platform spoof and no-sandbox", () => {
     const args = getCloakStealthArgs();
     expect(args).toContain("--no-sandbox");
-    expect(args).toContain("--fingerprint-platform=windows");
+    expect(args).toContain("--fingerprint-platform=linux");
   });
 
   it("generates a 5-digit numeric fingerprint seed", () => {
@@ -53,29 +62,18 @@ describe("resolveBrowser", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("falls back to stock Chrome when the override path does not exist", () => {
+  it("throws when the override path does not exist (no Chrome fallback)", () => {
     process.env.CLOAKBROWSER_BINARY_PATH = "/nonexistent/cloak/chrome";
-    const resolved = resolveBrowser();
-    // On the CI/dev linux box google-chrome or the patchright fallback applies;
-    // either way it must NOT report cloakbrowser.
-    expect(resolved.engine).toBe("chrome");
-    expect(resolved.executablePath).not.toContain(".cloakbrowser");
+    expect(() => resolveBrowser()).toThrow(BrowserNotFoundError);
   });
 
   it("auto-detects a cloak cache binary in CLOAKBROWSER_CACHE_DIR", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloak-cache-"));
-    const binaryDir = path.join(dir, "chromium-146.0.7680.177.5");
-    fs.mkdirSync(binaryDir);
-    const binary = path.join(binaryDir, "chrome");
-    fs.writeFileSync(binary, "#!/bin/sh\n");
-    fs.chmodSync(binary, 0o755);
-    process.env.CLOAKBROWSER_CACHE_DIR = dir;
+    process.env.CLOAKBROWSER_CACHE_DIR = makeFakeCache("146.0.7680.177.5");
 
     const resolved = resolveBrowser();
     expect(resolved.engine).toBe("cloakbrowser");
-    expect(resolved.executablePath).toBe(binary);
     expect(resolved.version).toBe("146.0.7680.177.5");
-    fs.rmSync(dir, { recursive: true, force: true });
+    expect(resolved.executablePath).toContain("chromium-146.0.7680.177.5");
   });
 
   it("prefers the highest cached cloak version", () => {
@@ -90,36 +88,30 @@ describe("resolveBrowser", () => {
     process.env.CLOAKBROWSER_CACHE_DIR = dir;
 
     const resolved = resolveBrowser();
-    expect(resolved.engine).toBe("cloakbrowser");
     expect(resolved.version).toBe("146.0.7680.177.5");
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("ignores the cloak cache when STEEL_DISABLE_CLOAKBROWSER=true", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloak-cache-"));
-    const binaryDir = path.join(dir, "chromium-146.0.7680.177.5");
-    fs.mkdirSync(binaryDir);
-    const binary = path.join(binaryDir, "chrome");
-    fs.writeFileSync(binary, "#!/bin/sh\n");
-    fs.chmodSync(binary, 0o755);
-    process.env.CLOAKBROWSER_CACHE_DIR = dir;
-    process.env.STEEL_DISABLE_CLOAKBROWSER = "true";
-
-    const resolved = resolveBrowser();
-    expect(resolved.engine).toBe("chrome");
-    fs.rmSync(dir, { recursive: true, force: true });
+  it("throws BrowserNotFoundError when no cloak binary exists anywhere", () => {
+    process.env.CLOAKBROWSER_CACHE_DIR = fs.mkdtempSync(
+      path.join(os.tmpdir(), "cloak-empty-"),
+    );
+    try {
+      expect(() => resolveBrowser()).toThrow(/npx cloakbrowser install/);
+    } finally {
+      fs.rmSync(process.env.CLOAKBROWSER_CACHE_DIR, { recursive: true, force: true });
+    }
   });
 
-  it("falls back to CHROME_EXECUTABLE_PATH when no cloak binary exists", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-test-"));
-    const binary = path.join(dir, "google-chrome");
-    fs.writeFileSync(binary, "#!/bin/sh\n");
-    fs.chmodSync(binary, 0o755);
-    process.env.CHROME_EXECUTABLE_PATH = binary;
-
-    const resolved = resolveBrowser();
-    expect(resolved.engine).toBe("chrome");
-    expect(resolved.executablePath).toBe(binary);
-    fs.rmSync(dir, { recursive: true, force: true });
+  it("never resolves a stock Chrome path even when one exists on disk", () => {
+    // Empty cache; /usr/bin/google-chrome may exist on the host but must be ignored.
+    process.env.CLOAKBROWSER_CACHE_DIR = fs.mkdtempSync(
+      path.join(os.tmpdir(), "cloak-empty-"),
+    );
+    try {
+      expect(() => resolveBrowser()).toThrow(BrowserNotFoundError);
+    } finally {
+      fs.rmSync(process.env.CLOAKBROWSER_CACHE_DIR, { recursive: true, force: true });
+    }
   });
 });

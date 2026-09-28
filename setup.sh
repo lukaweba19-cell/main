@@ -18,27 +18,19 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-3000}"
 NODE_ENV="${NODE_ENV:-production}"
 
-# Prefer the CloakBrowser stealth Chromium when installed (~/.cloakbrowser),
-# then google-chrome, then chromium. Mirrors api/src/utils/resolve-browser.ts.
+# CloakBrowser-only: resolve the stealth Chromium, or fail with instructions.
+# Stock Chrome/Chromium is not supported in this deployment.
 CLOAK_BINARY=""
 if [[ -n "${CLOAKBROWSER_BINARY_PATH:-}" && -x "${CLOAKBROWSER_BINARY_PATH}" ]]; then
   CLOAK_BINARY="${CLOAKBROWSER_BINARY_PATH}"
-elif [[ -d "${HOME}/.cloakbrowser" ]] && [[ "${STEEL_DISABLE_CLOAKBROWSER:-}" != "true" ]]; then
+elif [[ -d "${HOME}/.cloakbrowser" ]]; then
   CLOAK_BINARY=$(ls -1 "${HOME}"/.cloakbrowser/chromium-*/chrome 2>/dev/null | sort -r | head -1 || true)
 fi
-if [[ -n "${CLOAK_BINARY}" ]]; then
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-${CLOAK_BINARY}}"
-elif [[ -x /usr/bin/google-chrome ]]; then
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/google-chrome}"
-elif [[ -x /usr/bin/google-chrome-stable ]]; then
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/google-chrome-stable}"
-elif [[ -x /usr/bin/chromium ]]; then
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/chromium}"
-elif [[ -x /usr/bin/chromium-browser ]]; then
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/chromium-browser}"
-else
-  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-}"
+if [[ -z "${CLOAK_BINARY}" ]]; then
+  err "CloakBrowser binary not found (~/.cloakbrowser). Install with: npx cloakbrowser install"
+  exit 1
 fi
+CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-${CLOAK_BINARY}}"
 
 UI_DIST_PATH="${UI_DIST_PATH:-${ROOT_DIR}/ui/dist}"
 DOMAIN="${DOMAIN:-207.180.29.28:3000}"

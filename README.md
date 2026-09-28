@@ -4,30 +4,30 @@ Patched-down Steel Browser monorepo (`api` + `ui` + `repl`) running headful on
 Xvfb with automatic extension loading and automatic video recording of every
 scrape/session.
 
-## Browser engine: CloakBrowser (stealth Chromium)
+## Browser engine: CloakBrowser only (no stock Chrome)
 
-Launches prefer the [CloakBrowser](https://github.com/CloakHQ/cloakbrowser)
-stealth Chromium — a Chromium build with fingerprint patches compiled into the
-binary at the C++ source level (canvas, WebGL, audio, fonts, GPU, WebRTC,
-automation-signal removal) — and fall back to stock Google Chrome when it is
-not installed.
+This deployment launches exclusively the
+[CloakBrowser](https://github.com/CloakHQ/cloakbrowser) stealth Chromium — a
+Chromium build with fingerprint patches compiled into the binary at the C++
+source level (canvas, WebGL, audio, fonts, GPU, WebRTC, automation-signal
+removal). Stock Chrome/Chromium is not supported: there is no fallback, and
+`setup.sh` refuses to start without the CloakBrowser binary.
 
-Detection order (mirrored in `api/src/utils/resolve-browser.ts` and
+Binary resolution (mirrored in `api/src/utils/resolve-browser.ts` and
 `setup.sh`):
 
 1. `CLOAKBROWSER_BINARY_PATH` (or `CLOAKBROWSER_EXECUTABLE_PATH`) — explicit override
-2. `~/.cloakbrowser/chromium-<version>/chrome` — the binary `npx cloakbrowser install`
-   downloads (highest version wins; `-pro` builds preferred when a license key exists)
-3. `CHROME_EXECUTABLE_PATH`
-4. `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/usr/bin/chromium`,
-   `/usr/bin/chromium-browser`
-5. Patchright's bundled Chromium
+2. `~/.cloakbrowser/chromium-<version>/chrome` — what `npx cloakbrowser install`
+   downloads (highest version wins; `-pro` builds preferred when licensed)
 
-When the CloakBrowser binary is selected, the launcher passes the same stealth
-arguments the official wrapper passes on Linux — `--fingerprint=<random seed>`
-and `--fingerprint-platform=windows` — which drive the patched code paths
-inside the binary. The active engine is reported by `GET /v1/health` as
-`{"status":"ok","browser":"cloakbrowser"|"chrome"}` and logged on startup.
+If neither exists, launches fail with `CloakBrowser binary not found. Install
+it with: npx cloakbrowser install`.
+
+The launcher passes the stealth arguments that drive the patched code paths —
+`--fingerprint=<random seed>` and `--fingerprint-platform=linux` (native Linux
+persona; the binary spoofs GPU/hardware/screen from the seed). The engine is
+reported by `GET /v1/health` as `{"status":"ok","browser":"cloakbrowser",
+"browserRunning":false}` (`browserRunning` is true while a session is live).
 
 ### Installing CloakBrowser (on the VM)
 
@@ -42,13 +42,12 @@ Optional env vars:
 | --- | --- |
 | `CLOAKBROWSER_BINARY_PATH` | Use exactly this binary |
 | `CLOAKBROWSER_CACHE_DIR` | Custom cache dir to scan (default `~/.cloakbrowser`) |
-| `STEEL_DISABLE_CLOAKBROWSER=true` | Ignore CloakBrowser, use stock Chrome |
 
-Verify which engine is live:
+Verify:
 
 ```bash
 curl -s http://127.0.0.1:3000/v1/health
-# {"status":"ok","browser":"cloakbrowser"}
+# {"status":"ok","browser":"cloakbrowser","browserRunning":false}
 ```
 
 ## Setup / operations

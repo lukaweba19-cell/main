@@ -27,8 +27,8 @@ import {
   compileUrlPatterns,
   isImageRequest,
 } from "../../utils/requests.js";
-import { getChromeExecutablePath } from "../../utils/browser.js";
 import {
+  BrowserNotFoundError,
   getCloakStealthArgs,
   resolveBrowser,
 } from "../../utils/resolve-browser.js";
@@ -126,16 +126,24 @@ export class CDPService extends EventEmitter {
     this.browserInstance = null;
     this.wsEndpoint = null;
     this.sessionContext = null;
-    // Prefer the CloakBrowser stealth Chromium when its binary is installed;
-    // fall back to stock Chrome otherwise. Logged on first launch.
-    const resolved = resolveBrowser();
-    this.chromeExecPath = resolved.executablePath;
-    this.browserEngine = resolved.engine;
-    if (resolved.engine === "cloakbrowser") {
+    // CloakBrowser-only: resolve the stealth binary up front. A missing
+    // binary is a configuration error, not a fallback situation.
+    try {
+      const resolved = resolveBrowser();
+      this.chromeExecPath = resolved.executablePath;
+      this.browserEngine = "cloakbrowser";
       this.logger.info(
-        `[CDPService] CloakBrowser stealth Chromium detected: ${resolved.executablePath}` +
+        `[CDPService] CloakBrowser stealth Chromium: ${resolved.executablePath}` +
           (resolved.version ? ` (v${resolved.version})` : ""),
       );
+    } catch (err) {
+      if (err instanceof BrowserNotFoundError) {
+        this.logger.error(`[CDPService] ${err.message}`);
+      }
+      // Defer the throw to launch time so the service still boots and can
+      // serve /health; every launch attempt will surface the same error.
+      this.chromeExecPath = "";
+      this.browserEngine = "cloakbrowser";
     }
     this.defaultTimezone = env.DEFAULT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
     this.trackedOrigins = new Set<string>();
@@ -197,12 +205,9 @@ export class CDPService extends EventEmitter {
 
   public setChromeExecPath(execPath: string): void {
     this.chromeExecPath = execPath;
-    // An explicit override switches the engine profile back to stock Chrome
-    // unless the path is clearly a cloak cache binary.
-    this.browserEngine = execPath.includes(".cloakbrowser") ? "cloakbrowser" : "chrome";
   }
 
-  /** Which engine the launcher is configured to use. */
+  /** Which engine the launcher is configured to use. Always cloakbrowser. */
   public getBrowserEngine(): "cloakbrowser" | "chrome" {
     return this.browserEngine;
   }
@@ -558,6 +563,12 @@ export class CDPService extends EventEmitter {
           }`,
           this.launchConfig.fullscreen === true ? "--kiosk" : "",
         ];
+
+        if (!this.chromeExecPath) {
+          throw new BrowserNotFoundError(
+            "CloakBrowser binary not found. Install it with: npx cloakbrowser install",
+          );
+        }
 
         const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
 

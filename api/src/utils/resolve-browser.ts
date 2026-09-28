@@ -3,26 +3,21 @@ import os from "os";
 import path from "path";
 
 /**
- * Browser engine resolution with CloakBrowser support.
+ * CloakBrowser-only browser resolution.
  *
- * CloakBrowser (github.com/CloakHQ/cloakbrowser) is a Chromium binary with
- * source-level (C++) fingerprint patches — 58 patches on the free Linux build.
- * When its binary is present we prefer it over stock Chrome and add the same
- * stealth arguments the official cloakbrowser JS wrapper would pass
- * (--fingerprint=<seed>, --fingerprint-platform=windows), because those flags
- * drive the C++-patched code paths inside the binary.
+ * This deployment launches exclusively the CloakBrowser stealth Chromium
+ * (github.com/CloakHQ/cloakbrowser) — a Chromium build with fingerprint
+ * patches compiled in at the C++ source level. Stock Chrome/Chromium is not
+ * supported and never resolved; if no CloakBrowser binary exists the launch
+ * fails with instructions instead of silently falling back.
  *
  * Priority:
  *   1. CLOAKBROWSER_BINARY_PATH / CLOAKBROWSER_EXECUTABLE_PATH (explicit override)
- *   2. ~/.cloakbrowser/chromium-<version>/chrome  (what `npx cloakbrowser install`
- *      downloads; picks the highest version, prefers -pro builds when licensed)
- *   3. CHROME_EXECUTABLE_PATH (existing behaviour)
- *   4. Platform Chrome locations (google-chrome, chromium, ...)
- *
- * Disable entirely with STEEL_DISABLE_CLOAKBROWSER=true.
+ *   2. ~/.cloakbrowser/chromium-<version>/chrome (what `npx cloakbrowser install`
+ *      downloads; highest version wins, -pro builds preferred when licensed)
  */
 
-const CLOAK_STEALTH_ARGS = ["--no-sandbox", "--fingerprint-platform=windows"] as const;
+const CLOAK_STEALTH_ARGS = ["--no-sandbox", "--fingerprint-platform=linux"] as const;
 
 export interface ResolvedBrowser {
   /** Absolute path to the browser executable to launch. */
@@ -33,6 +28,13 @@ export interface ResolvedBrowser {
   version?: string;
   /** True when engine === "cloakbrowser": launch must add the cloak stealth args. */
   stealthArgs: string[];
+}
+
+export class BrowserNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserNotFoundError";
+  }
 }
 
 /** A random 5-digit fingerprint seed, matching the official wrapper's behaviour. */
@@ -120,19 +122,20 @@ function findCloakBinaryInCache(cacheDir: string): ResolvedBrowser | null {
 }
 
 /**
- * The stealth args the official cloakbrowser wrapper passes on Linux:
- * --no-sandbox, --fingerprint=<random 5-digit seed>, --fingerprint-platform=windows.
- * The launcher merges these; the fingerprint seed is generated per launch.
+ * The stealth args the launcher passes to the CloakBrowser binary on Linux:
+ * --no-sandbox, --fingerprint=<random 5-digit seed>, --fingerprint-platform=linux.
+ * The fingerprint seed is generated per launch.
  */
 export function getCloakStealthArgs(): string[] {
   return [`--fingerprint=${fingerprintSeed()}`, ...CLOAK_STEALTH_ARGS];
 }
 
 /**
- * Resolve which browser binary to launch and whether it needs cloak stealth args.
+ * Resolve the CloakBrowser binary to launch. Throws BrowserNotFoundError when
+ * none is installed — there is deliberately no Chrome/Chromium fallback.
  */
 export function resolveBrowser(): ResolvedBrowser {
-  // 1. Explicit overrides always win.
+  // 1. Explicit override always wins.
   const override =
     process.env.CLOAKBROWSER_BINARY_PATH || process.env.CLOAKBROWSER_EXECUTABLE_PATH;
   if (override) {
@@ -145,58 +148,19 @@ export function resolveBrowser(): ResolvedBrowser {
         stealthArgs: [],
       };
     }
-    console.warn(
-      `[browser] CLOAKBROWSER_BINARY_PATH=${executablePath} does not exist — falling back`,
+    throw new BrowserNotFoundError(
+      `CLOAKBROWSER_BINARY_PATH=${executablePath} does not exist`,
     );
   }
 
-  // 2. Auto-detected CloakBrowser cache (~/.cloakbrowser), unless disabled.
-  if (process.env.STEEL_DISABLE_CLOAKBROWSER !== "true") {
-    const cacheDir =
-      process.env.CLOAKBROWSER_CACHE_DIR || path.join(os.homedir(), ".cloakbrowser");
-    const cloak = findCloakBinaryInCache(cacheDir);
-    if (cloak) return cloak;
-  }
+  // 2. Auto-detected CloakBrowser cache (~/.cloakbrowser).
+  const cacheDir =
+    process.env.CLOAKBROWSER_CACHE_DIR || path.join(os.homedir(), ".cloakbrowser");
+  const cloak = findCloakBinaryInCache(cacheDir);
+  if (cloak) return cloak;
 
-  // 3/4. Existing behaviour: CHROME_EXECUTABLE_PATH then platform locations.
-  // Read from process.env (not the frozen zod env) so runtime overrides work.
-  const configuredPath = process.env.CHROME_EXECUTABLE_PATH;
-  if (configuredPath) {
-    const executablePath = path.normalize(configuredPath);
-    if (fs.existsSync(executablePath)) {
-      return { executablePath, engine: "chrome", stealthArgs: [] };
-    }
-    console.warn(`Your custom chrome executable at ${executablePath} does not exist`);
-  }
-
-  const platformPaths: string[] = [];
-  if (process.platform === "win32") {
-    platformPaths.push(
-      `${process.env["ProgramFiles"]}\\Google\\Chrome\\Application\\chrome.exe`,
-      `C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe`,
-    );
-  } else if (process.platform === "darwin") {
-    platformPaths.push("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
-  } else {
-    platformPaths.push(
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-    );
-  }
-  for (const candidate of platformPaths) {
-    if (fs.existsSync(candidate)) {
-      return { executablePath: candidate, engine: "chrome", stealthArgs: [] };
-    }
-  }
-
-  // Final fallback: patchright's own Chromium build.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { chromium } = require("patchright");
-    return { executablePath: chromium.executablePath(), engine: "chrome", stealthArgs: [] };
-  } catch {
-    return { executablePath: "/usr/bin/chromium", engine: "chrome", stealthArgs: [] };
-  }
+  throw new BrowserNotFoundError(
+    `CloakBrowser binary not found (looked in ${cacheDir}). ` +
+      `Install it with: npx cloakbrowser install`,
+  );
 }
