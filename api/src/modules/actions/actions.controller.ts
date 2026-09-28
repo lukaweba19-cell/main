@@ -160,6 +160,7 @@ export const handleScrape = async (
           ready: true,
           challengeDetected: false,
           challengeCleared: false,
+          settled: true,
           waitedMs: 0,
           snapshot: null,
         };

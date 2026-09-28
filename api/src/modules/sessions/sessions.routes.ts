@@ -39,12 +39,13 @@ async function routes(server: FastifyInstance) {
       },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      if (!server.cdpService.isRunning()) {
-        return reply.status(503).send({ status: "service_unavailable" });
-      }
+      // The HTTP service being reachable IS the health signal: the browser is
+      // launched on demand and shuts down when idle, so a healthy idle service
+      // has no live browser. 503 would be wrong there.
       return reply.send({
         status: "ok",
         browser: server.cdpService.getBrowserEngine(),
+        browserRunning: server.cdpService.isRunning(),
       });
     },
   );

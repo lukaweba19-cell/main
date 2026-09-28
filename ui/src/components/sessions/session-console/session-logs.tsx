@@ -139,9 +139,25 @@ export default function SessionLogs({
     };
   }, [id, isLive, session?.createdAt, session?.duration]);
 
+  // Stick-to-bottom only while the user is already at the bottom. Once they
+  // scroll up to read, new log lines never yank the view back down.
+  const stickToBottomRef = useRef(true);
+
   useEffect(() => {
-    if (consoleRef.current) {
-      consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+    const el = consoleRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distance < 40;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = consoleRef.current;
+    if (el && stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [logs]);
 

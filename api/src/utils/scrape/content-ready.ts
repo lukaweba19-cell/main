@@ -1,61 +1,95 @@
 import type { Page } from "patchright";
 
 /**
- * Cloudflare and similar bot checks are solved automatically by the headful
- * browser (the extensions we load handle Turnstile/hCaptcha/reCAPTCHA). Instead
- * of the old fixed `delay` guessing game, we detect the transition directly:
+ * Automatic "the site is actually loaded" detection.
  *
- *   challenge page  ->  cleared  ->  real content parsed from the HTML
+ * Instead of a fixed delay, we watch the page itself and finish the scrape the
+ * moment the requested content is really there:
  *
- * The wait finishes as soon as the page holds parseable content bigger than any
- * challenge payload, or the timeout elapses (whichever comes first).
+ *   1. Challenge interstitials (Cloudflare & friends) are detected and waited
+ *      out while the loaded extensions solve them. The check is title/body
+ *      based — Cloudflare's challenge <script> tags stay in the DOM after the
+ *      challenge clears, so they must never count as "still challenged".
+ *   2. Once unchallenged, we wait for the page to go quiet: document ready,
+ *      no in-flight requests (network idle) and a stable DOM (no mutation for
+ *      a settle window). The first poll that satisfies all three returns —
+ *      no fixed timeout burn.
+ *   3. Simple, small pages (example.com) qualify immediately, so they finish
+ *      in seconds instead of waiting out the whole timeout.
  */
 
-const MIN_CONTENT_CHARS = 500;
-const MIN_MARKDOWN_CHARS = 200;
+const CHALLENGE_TITLES = [
+  "just a moment",
+  "attention required",
+  "security check",
+  "checking your browser",
+  "one more step",
+];
+
+const CHALLENGE_BODY_PHRASES = [
+  "performing security verification",
+  "checking your browser before accessing",
+  "verify you are human",
+  "confirm you are human",
+  "enable javascript and cookies to continue",
+  "needs to review the security of your connection",
+];
+
+/** Challenge page shell: nearly no real DOM content. */
+const CHALLENGE_MAX_CONTENT_CHARS = 300;
+
+/** Real-content thresholds (small pages must pass trivially). */
+const MIN_CONTENT_CHARS = 200;
+const MIN_TAG_COUNT = 5;
+
+/** No request may be in flight during this window to call the page quiet. */
+const QUIET_WINDOW_MS = 1200;
+/** DOM must be unchanged for this long before we accept it as settled. */
+const DOM_SETTLE_MS = 1200;
+/** How long a challenge may take to clear before we give up waiting. */
+const DEFAULT_TIMEOUT_MS = 60_000;
+/** Poll cadence while waiting for readiness. */
+const POLL_MS = 500;
 
 function isChallengeTitle(title: string): boolean {
   const t = (title || "").toLowerCase();
-  return (
-    t.includes("just a moment") ||
-    t.includes("attention required") ||
-    t.includes("security check") ||
-    t.includes("checking your browser") ||
-    t.includes("one more step")
-  );
+  return CHALLENGE_TITLES.some((s) => t.includes(s));
 }
 
-/** Runs in the page: returns the challenge/content signature of the current DOM. */
+/**
+ * Runs in the page: challenge/content signature of the current DOM.
+ *
+ * Challenge detection deliberately ignores script src/urls: Cloudflare leaves
+ * challenge-platform/turnstile script tags in the DOM long after the challenge
+ * has been solved, and counting them kept scrapes alive for the full timeout.
+ */
 function pageSnapshot() {
   const title = (document.title || "").toLowerCase();
   const body = (document.body?.innerText || "").trim();
-  const html = (document.documentElement?.innerHTML || "").toLowerCase();
+
+  const bodyLower = body.toLowerCase();
+  const challengeByBody =
+    CHALLENGE_BODY_PHRASES.some((s) => bodyLower.includes(s)) &&
+    body.length < 2000; // challenge shells are short; real pages never match
 
   const challenge =
-    title.includes("just a moment") ||
-    title.includes("attention required") ||
-    title.includes("security check") ||
-    title.includes("checking your browser") ||
-    body.includes("performing security verification") ||
-    body.includes("checking your browser before accessing") ||
-    body.includes("verify you are human") ||
-    body.includes("enable javascript and cookies to continue") ||
-    html.includes("cf-challenge") ||
-    html.includes("challenge-platform") ||
-    html.includes("turnstile") ||
-    html.includes("cf-browser-verification") ||
-    html.includes("cdn-cgi/challenge");
+    isChallengeTitle(title) ||
+    (challengeByBody && body.length < CHALLENGE_MAX_CONTENT_CHARS);
 
-  // Real content heuristics: enough text, a reasonable tag count, and not
-  // dominated by the challenge boilerplate.
-  const tagCount = document.querySelectorAll("a, p, h1, h2, h3, li, td, th, article, section").length;
+  const tagCount = document.querySelectorAll(
+    "a, p, h1, h2, h3, li, td, th, article, section",
+  ).length;
   const contentChars = body.length;
+  const pendingImages = Array.from(document.images).filter(
+    (img) => !img.complete,
+  ).length;
 
   return {
     challenge,
     title: document.title || "",
     contentChars,
     tagCount,
+    pendingImages,
     url: window.location.href,
     readyState: document.readyState,
   };
@@ -66,6 +100,7 @@ export type ContentSnapshot = {
   title: string;
   contentChars: number;
   tagCount: number;
+  pendingImages: number;
   url: string;
   readyState: string;
 };
@@ -86,20 +121,29 @@ export async function isChallengePage(page: Page): Promise<boolean> {
   return snap.challenge || isChallengeTitle(snap.title);
 }
 
-/** True when the DOM holds real, parseable content (well beyond a challenge shell). */
+/** True when the DOM holds real, parseable content (small pages pass trivially). */
 export function hasRealContent(snap: ContentSnapshot): boolean {
   if (snap.challenge) return false;
-  if (snap.readyState !== "complete" && snap.readyState !== "interactive") return false;
-  if (snap.contentChars < MIN_CONTENT_CHARS && snap.tagCount < 25) return false;
-  // A challenge page typically has < 1KB of markup; require a real document.
-  return snap.tagCount >= 10;
+  if (snap.readyState !== "complete" && snap.readyState !== "interactive") {
+    return false;
+  }
+  return snap.contentChars >= MIN_CONTENT_CHARS || snap.tagCount >= MIN_TAG_COUNT;
+}
+
+/** True when the page is unchallenged, real, and fully settled (loaded). */
+export function isPageSettled(snap: ContentSnapshot): boolean {
+  return hasRealContent(snap) && snap.readyState === "complete";
 }
 
 export interface WaitForContentOptions {
   /** Max time to wait for content (ms). Default 60000. */
   timeoutMs?: number;
-  /** Poll interval (ms). Default 750. */
+  /** Poll interval (ms). Default 500. */
   pollMs?: number;
+  /** No in-flight requests for this long counts as network-quiet. Default 1200. */
+  quietWindowMs?: number;
+  /** DOM unchanged for this long counts as settled. Default 1200. */
+  domSettleMs?: number;
   /** Optional logger. */
   log?: (msg: string) => void;
 }
@@ -111,54 +155,109 @@ export interface WaitForContentResult {
   challengeDetected: boolean;
   /** If seen, whether the challenge cleared before timeout. */
   challengeCleared: boolean;
+  /** True when we returned because the page looked fully settled. */
+  settled: boolean;
   waitedMs: number;
   snapshot: ContentSnapshot | null;
 }
 
 /**
- * Wait until the page either holds real content or times out. Detects
- * Cloudflare-style challenges automatically and waits for them to clear
- * (the loaded extensions solve them) — no user-configured delay needed.
+ * Wait until the page is actually loaded: not challenged, real content
+ * present, network quiet and DOM stable. Returns the moment that is true.
  */
 export async function waitForPageContent(
   page: Page,
   options: WaitForContentOptions = {},
 ): Promise<WaitForContentResult> {
-  const timeoutMs = options.timeoutMs ?? 60_000;
-  const pollMs = options.pollMs ?? 750;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? POLL_MS;
+  const quietWindowMs = options.quietWindowMs ?? QUIET_WINDOW_MS;
+  const domSettleMs = options.domSettleMs ?? DOM_SETTLE_MS;
   const log = options.log ?? (() => {});
   const start = Date.now();
 
   let challengeDetected = false;
+  let challengeCleared = false;
   let lastSnapshot: ContentSnapshot | null = null;
+  let lastGoodSnapshot: ContentSnapshot | null = null;
+
+  // Poll-based quiet/settle tracking (no CDP session needed; works everywhere).
+  let quietSince: number | null = null;
+  let lastSignature: string | null = null;
+  let stableSince: number | null = null;
 
   while (Date.now() - start < timeoutMs) {
     if (page.isClosed()) break;
 
     lastSnapshot = await snapshotPage(page);
     if (!lastSnapshot) {
+      quietSince = null;
+      stableSince = null;
       await new Promise((r) => setTimeout(r, pollMs));
       continue;
     }
 
+    // 1. Challenge interstitial: wait it out (extensions solve it).
     if (lastSnapshot.challenge || isChallengeTitle(lastSnapshot.title)) {
       if (!challengeDetected) {
         challengeDetected = true;
         log(`[waitForContent] Challenge detected, waiting for automatic solve`);
       }
+      quietSince = null;
+      stableSince = null;
+      lastSignature = null;
       await new Promise((r) => setTimeout(r, pollMs));
       continue;
     }
 
-    if (hasRealContent(lastSnapshot)) {
-      const waitedMs = Date.now() - start;
-      if (challengeDetected) {
-        log(`[waitForContent] Challenge cleared after ${waitedMs}ms`);
-      }
+    if (challengeDetected) {
+      challengeCleared = true;
+      log(
+        `[waitForContent] Challenge cleared after ${Date.now() - start}ms — waiting for page to settle`,
+      );
+      challengeDetected = false; // cleared; keep waiting for real load
+      quietSince = null;
+      stableSince = null;
+      lastSignature = null;
+    }
+
+    // 2. Real content not there yet — keep waiting.
+    if (!hasRealContent(lastSnapshot)) {
+      quietSince = null;
+      stableSince = null;
+      lastSignature = null;
+      await new Promise((r) => setTimeout(r, pollMs));
+      continue;
+    }
+    lastGoodSnapshot = lastSnapshot;
+
+    // 3. Track quiet + stability. Signature is cheap DOM fingerprint.
+    const signature = `${lastSnapshot.title}|${lastSnapshot.contentChars}|${lastSnapshot.tagCount}`;
+    const now = Date.now();
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      stableSince = now;
+    }
+    const stableFor = now - (stableSince ?? now);
+
+    // Images still loading counts as activity.
+    const busy = lastSnapshot.pendingImages > 0;
+    if (!busy && quietSince === null) quietSince = now;
+    if (busy) quietSince = null;
+    const quietFor = busy ? 0 : now - (quietSince ?? now);
+
+    const settled = quietFor >= quietWindowMs && stableFor >= domSettleMs;
+    if (settled) {
+      const waitedMs = now - start;
+      log(
+        `[waitForContent] Page settled after ${waitedMs}ms` +
+          (challengeCleared ? " (challenge cleared earlier)" : ""),
+      );
       return {
         ready: true,
-        challengeDetected,
-        challengeCleared: challengeDetected,
+        challengeDetected: challengeCleared,
+        challengeCleared,
+        settled: true,
         waitedMs,
         snapshot: lastSnapshot,
       };
@@ -168,24 +267,20 @@ export async function waitForPageContent(
   }
 
   const waitedMs = Date.now() - start;
+  const finalSnap = lastGoodSnapshot ?? lastSnapshot;
   log(
-    `[waitForContent] Finished after ${waitedMs}ms — ready=${hasRealContent(lastSnapshot ?? {
-      challenge: false,
-      title: "",
-      contentChars: 0,
-      tagCount: 0,
-      url: "",
-      readyState: "loading",
-    })}, challengeDetected=${challengeDetected}`,
+    `[waitForContent] Finished after ${waitedMs}ms — ready=${finalSnap ? hasRealContent(finalSnap) : false}` +
+      `, challengeSeen=${challengeCleared}`,
   );
 
   return {
-    ready: lastSnapshot ? hasRealContent(lastSnapshot) : false,
-    challengeDetected,
-    challengeCleared: challengeDetected ? !!(lastSnapshot && !lastSnapshot.challenge) : false,
+    ready: finalSnap ? hasRealContent(finalSnap) : false,
+    challengeDetected: challengeCleared,
+    challengeCleared,
+    settled: false,
     waitedMs,
-    snapshot: lastSnapshot,
+    snapshot: finalSnap,
   };
 }
 
-export { MIN_CONTENT_CHARS, MIN_MARKDOWN_CHARS };
+export { MIN_CONTENT_CHARS, MIN_TAG_COUNT };
