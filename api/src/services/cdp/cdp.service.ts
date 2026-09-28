@@ -890,7 +890,13 @@ export class CDPService extends EventEmitter {
       await this.pluginManager.onShutdown(reason);
 
       this.removeAllHandlers();
-      await this.browserInstance?.close().catch(() => {});
+      // Bound the close call: on a crashed/already-dead browser the CDP
+      // transport may never answer, and an unbounded close would wedge
+      // every future job waiting on this service.
+      await Promise.race([
+        this.browserInstance?.close().catch(() => {}) ?? Promise.resolve(),
+        new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+      ]);
       await this.shutdownHook();
 
       this.logger.info("[CDPService] Cleaning up files during shutdown");

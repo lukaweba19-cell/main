@@ -48,16 +48,13 @@ async function withScraperSession<T>(
         await proxy.listen();
       }
 
-      // Fresh headful Chrome per job. Never run work under the idle placeholder.
+      // Fresh headful Chrome per job. startSession owns the full launch
+      // (config, timezone, extensions); a second ensureBrowser here would
+      // take the reuse path and close/recreate pages on a freshly launched
+      // browser, which can kill a --no-zygote renderer.
       const session = await sessionService.startSession({
         proxyUrl: proxy?.url ?? undefined,
         sessionExtensions: opts.sessionExtensions,
-      });
-
-      await browserService.ensureBrowser({
-        options: { proxyUrl: proxy?.url },
-        blockAds: false,
-        extensions: opts.sessionExtensions,
       });
 
       const page = await browserService.getPrimaryPage();
