@@ -1,6 +1,8 @@
 import fs from "fs";
+import os from "os";
 import path, { dirname } from "path";
 import { fileURLToPath } from "url";
+import { env } from "../env.js";
 
 /**
  * Resolve the extension directories to load into the browser.
@@ -10,16 +12,26 @@ import { fileURLToPath } from "url";
  * names requested by the caller must also exist in that directory.
  */
 export async function getExtensionPaths(extensionNames: string[] = []): Promise<string[]> {
-  const extensionsDir = path.join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "extensions",
-  );
+  // Primary: the persistent extension store the Extensions API uploads into
+  // (/data/extensions in production). Fallback: the bundled api/extensions
+  // directory from the original layout. STEEL_EXTENSIONS_DIR overrides both.
+  const candidateDirs = [
+    process.env.STEEL_EXTENSIONS_DIR,
+    env.NODE_ENV === "development" ? path.join(os.tmpdir(), "steel-extensions") : "/data/extensions",
+    path.join(dirname(fileURLToPath(import.meta.url)), "..", "..", "extensions"),
+  ].filter(Boolean) as string[];
 
-  try {
-    await fs.promises.access(extensionsDir);
-  } catch {
+  let extensionsDir: string | null = null;
+  for (const dir of candidateDirs) {
+    try {
+      await fs.promises.access(dir);
+      extensionsDir = dir;
+      break;
+    } catch {
+      // try next candidate
+    }
+  }
+  if (!extensionsDir) {
     console.warn("Extensions directory does not exist");
     return [];
   }
