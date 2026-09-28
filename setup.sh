@@ -62,10 +62,12 @@ check_deps() {
 install_deps() {
   log "Installing npm dependencies..."
   cd "${ROOT_DIR}"
+  # Dev dependencies are required for the TypeScript build; NODE_ENV=production
+  # would make npm skip them, so always install with --include=dev.
   if [[ -f package-lock.json ]]; then
-    npm ci --prefer-offline --no-audit --no-fund 2>/dev/null || npm install --prefer-offline --no-audit --no-fund
+    npm ci --include=dev --prefer-offline --no-audit --no-fund 2>/dev/null || npm install --include=dev --prefer-offline --no-audit --no-fund
   else
-    npm install --prefer-offline --no-audit --no-fund
+    npm install --include=dev --prefer-offline --no-audit --no-fund
   fi
   log "Dependencies installed."
 }
