@@ -536,7 +536,14 @@ export class CDPService extends EventEmitter {
           "--disable-backing-store-limit",
           "--password-store=basic",
           ...(shouldDisableSandbox
-            ? ["--no-sandbox", "--disable-setuid-sandbox", "--no-zygote"]
+            ? [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--no-zygote",
+                // Suppress the "unsupported command-line flag: --no-sandbox"
+                // infobar; the flag is required when running as root.
+                "--test-type",
+              ]
             : []),
         ];
 
