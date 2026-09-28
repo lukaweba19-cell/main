@@ -68,9 +68,10 @@ const browserInstancePlugin: FastifyPluginAsync = async (fastify, _options) => {
     },
   );
 
+  // Do NOT auto-launch Chrome on startup. Browser starts only when a scrape/session needs it,
+  // and is shut down when the scrape finishes so nothing sits idle.
   fastify.addHook("onListen", async function () {
-    this.log.info("Launching default browser...");
-    await cdpService.launch();
+    this.log.info("CDP service ready (browser will launch on demand, not idle).");
   });
 };
 

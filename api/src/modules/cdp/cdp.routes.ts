@@ -19,11 +19,25 @@ async function routes(server: FastifyInstance) {
       request: FastifyRequest<{ Querystring: z.infer<typeof cdpSchemas.GetDevtoolsUrlSchema> }>,
       reply: FastifyReply,
     ) => {
-      return reply.redirect(
-        `${server.cdpService.getDebuggerUrl()}?ws=${server.cdpService
-          .getDebuggerWsUrl(request.query.pageId)
-          .replace("ws:", "")}`,
-      );
+      try {
+        if (!server.cdpService.isRunning()) {
+          return reply.code(503).send({
+            success: false,
+            message: "Browser is not running yet. Wait for session startup and retry.",
+          });
+        }
+        return reply.redirect(
+          `${server.cdpService.getDebuggerUrl()}?ws=${server.cdpService
+            .getDebuggerWsUrl(request.query.pageId)
+            .replace("ws:", "")}`,
+        );
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : "Failed to resolve DevTools URL";
+        return reply.code(503).send({
+          success: false,
+          message,
+        });
+      }
     },
   );
 }

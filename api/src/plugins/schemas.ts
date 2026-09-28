@@ -11,6 +11,8 @@ import seleniumSchemas from "../modules/selenium/selenium.schema.js";
 import scalarTheme from "./scalar-theme.js";
 import { buildJsonSchemas } from "../utils/schema.js";
 import filesSchemas from "../modules/files/files.schema.js";
+import extensionsSchemas from "../modules/extensions/extensions.schema.js";
+import profilesSchemas from "../modules/profiles/profiles.schema.js";
 import { getBaseUrl } from "../utils/url.js";
 
 const SCHEMAS = {
@@ -20,6 +22,8 @@ const SCHEMAS = {
   ...cdpSchemas,
   ...seleniumSchemas,
   ...filesSchemas,
+  ...extensionsSchemas,
+  ...profilesSchemas,
 };
 
 export const { schemas, $ref } = buildJsonSchemas(SCHEMAS);

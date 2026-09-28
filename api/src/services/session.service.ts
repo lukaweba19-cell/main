@@ -1,3 +1,4 @@
+import { flushRecording } from "../utils/recording-store.js";
 import { FastifyBaseLogger } from "fastify";
 import { mkdir } from "fs/promises";
 import os from "os";
@@ -173,7 +174,7 @@ export class SessionService {
       proxy: proxyUrl,
       solveCaptcha: false,
       dimensions: finalDimensions,
-      isSelenium,
+      isSelenium: isSelenium ?? false,
       deviceConfig,
     });
 
@@ -275,7 +276,10 @@ export class SessionService {
     return this.activeSession;
   }
 
-  public async endSession(): Promise<SessionDetails> {
+  public async endSession(options?: { relaunchIdle?: boolean }): Promise<SessionDetails> {
+    try {
+      flushRecording(this.activeSession.id);
+    } catch {}
     this.activeSession.complete();
     this.activeSession.status = "released";
     this.activeSession.duration =
@@ -285,7 +289,7 @@ export class SessionService {
       this.seleniumService.close();
       await this.cdpService.launch();
     } else {
-      await this.cdpService.endSession();
+      await this.cdpService.endSession(undefined, { relaunchIdle: options?.relaunchIdle });
     }
 
     const releasedSession = this.activeSession;

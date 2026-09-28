@@ -1,12 +1,12 @@
-import { createContext, useState } from "react";
+import { createContext } from "react";
 import {
   SessionsContextType,
   SessionsProviderProps,
+  SessionsListResponse,
 } from "./sessions-context.types";
 import {
   getSessions,
   getSessionDetails,
-  GetSessionDetailsResponse,
   releaseBrowserSession,
   ReleaseBrowserSessionResponse,
   ReleaseBrowserSessionsError,
@@ -24,8 +24,19 @@ export const SessionsContext = createContext<SessionsContextType | undefined>(
 export function SessionsProvider({
   children,
 }: SessionsProviderProps): JSX.Element {
-  const [currentSession, setCurrentSession] =
-    useState<GetSessionDetailsResponse | null>(null);
+  const useSessions = () =>
+    useQuery<SessionsListResponse, Error>({
+      queryKey: ["sessions"],
+      queryFn: async () => {
+        const { error, data } = await getSessions();
+        if (error || !data) {
+          throw error || new Error("Failed to load sessions");
+        }
+        return data as SessionsListResponse;
+      },
+      refetchInterval: 2000,
+      retry: false,
+    });
 
   const useSession = (id: string) =>
     useQuery<SessionDetails, ErrorResponse>({
@@ -36,7 +47,7 @@ export function SessionsProvider({
           if (error || !data) {
             throw error;
           }
-          return data?.sessions[0];
+          return data?.sessions?.[0];
         }
         const { error, data } = await getSessionDetails({
           path: {
@@ -48,11 +59,9 @@ export function SessionsProvider({
         }
         return data;
       },
+      enabled: true,
       retry: false,
       refetchInterval: 1000,
-      onSuccess: () => {
-        setCurrentSession(currentSession);
-      },
     });
 
   const useReleaseSessionMutation = () =>
@@ -72,6 +81,7 @@ export function SessionsProvider({
           throw error;
         }
         queryClient.refetchQueries({ queryKey: ["session", id] });
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
         queryClient.invalidateQueries({ queryKey: ["sessionLogs", id] });
         return data;
       },
@@ -80,14 +90,14 @@ export function SessionsProvider({
       },
     });
 
-  const contextValue = {
-    currentSession,
-    useSession,
-    useReleaseSessionMutation,
-  };
-
   return (
-    <SessionsContext.Provider value={contextValue}>
+    <SessionsContext.Provider
+      value={{
+        useReleaseSessionMutation,
+        useSession,
+        useSessions,
+      }}
+    >
       {children}
     </SessionsContext.Provider>
   );

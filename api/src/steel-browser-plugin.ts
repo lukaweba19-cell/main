@@ -17,6 +17,8 @@ import {
   logsRoutes,
   seleniumRoutes,
   sessionsRoutes,
+  extensionsRoutes,
+  profilesRoutes,
 } from "./routes.js";
 import { fileURLToPath } from "node:url";
 import ejs from "ejs";
@@ -82,6 +84,8 @@ const steelBrowserPlugin: FastifyPluginAsync<SteelBrowserConfig> = async (fastif
   await fastify.register(cdpRoutes, { prefix: "/v1" });
   await fastify.register(seleniumRoutes);
   await fastify.register(filesRoutes, { prefix: "/v1" });
+  await fastify.register(extensionsRoutes, { prefix: "/v1" });
+  await fastify.register(profilesRoutes, { prefix: "/v1" });
 
   const enableLogsRoutes = opts.logging?.enableLogsRoutes ?? true;
   if (enableLogsRoutes) {

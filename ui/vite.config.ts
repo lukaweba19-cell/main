@@ -5,6 +5,8 @@ import { fileURLToPath } from "url";
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Serve under /ui when embedded in the Steel API
+  base: "/ui/",
   plugins: [react()],
   resolve: {
     alias: {

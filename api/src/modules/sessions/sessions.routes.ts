@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   handleLaunchBrowserSession,
@@ -19,6 +20,12 @@ import {
   SessionsPDFRequest,
 } from "./sessions.schema.js";
 import { BrowserEventType, EmitEvent } from "../../types/enums.js";
+import {
+  appendRecordingEvents,
+  getRecording,
+  flushRecording,
+  getRecordingVideoPath,
+} from "../../utils/recording-store.js";
 
 async function routes(server: FastifyInstance) {
   server.get(
@@ -172,6 +179,12 @@ async function routes(server: FastifyInstance) {
       },
     },
     async (request: FastifyRequest<{ Body: RecordedEvents }>, reply: FastifyReply) => {
+      const sessionId = server.sessionService.activeSession?.id;
+      const body = request.body as any;
+      const events = body?.events || (Array.isArray(body) ? body : []);
+      if (sessionId && events.length) {
+        appendRecordingEvents(sessionId, events);
+      }
       server.cdpService.getInstrumentationLogger().record({
         type: BrowserEventType.Recording,
         timestamp: new Date().toISOString(),
@@ -198,6 +211,64 @@ async function routes(server: FastifyInstance) {
     },
     async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) =>
       handleGetSessionLiveDetails(server, request, reply),
+  );
+
+  server.get(
+    "/sessions/:sessionId/recording",
+    {
+      schema: {
+        operationId: "get_session_recording",
+        description: "Get DOM recording (rrweb events) for a session",
+        tags: ["Sessions"],
+        summary: "Get session DOM recording",
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: {
+            sessionId: { type: "string" },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { sessionId: string } }>, reply: FastifyReply) => {
+      const data = getRecording(request.params.sessionId);
+      if (!data) {
+        return reply.code(404).send({ message: "No recording found for this session" });
+      }
+      if (!data.videoUrl && !(data.events && data.events.length)) {
+        return reply.code(404).send({ message: "No recording found for this session" });
+      }
+      return reply.send(data);
+    },
+  );
+
+  server.get(
+    "/sessions/:sessionId/recording/video",
+    {
+      schema: {
+        operationId: "get_session_recording_video",
+        description: "Stream session recording video (mp4)",
+        tags: ["Sessions"],
+        summary: "Get session recording video",
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string" } },
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { sessionId: string } }>, reply: FastifyReply) => {
+      const videoPath = getRecordingVideoPath(request.params.sessionId);
+      if (!videoPath) {
+        return reply.code(404).send({ message: "No video recording for this session" });
+      }
+      const fs = await import("node:fs");
+      const stat = fs.statSync(videoPath);
+      reply.header("Content-Type", "video/mp4");
+      reply.header("Content-Length", stat.size);
+      reply.header("Accept-Ranges", "bytes");
+      return reply.send(fs.createReadStream(videoPath));
+    },
   );
 
   server.post(

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { EventEmitter } from "events";
 import { FastifyBaseLogger } from "fastify";
 import {
@@ -113,7 +114,7 @@ export class CDPService extends EventEmitter {
   private proxyWebSocketHandler:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void>)
     | null = null;
-  private disconnectHandler: () => Promise<void> = () => this.endSession();
+  private disconnectHandler: () => Promise<void> = async () => {};
 
   constructor(
     config: { keepAlive?: boolean },
@@ -267,9 +268,13 @@ export class CDPService extends EventEmitter {
 
   public getDebuggerWsUrl(pageId?: string) {
     const { baseUrl, wsProtocol } = this.getDebuggerBase();
-    return `${wsProtocol}://${baseUrl}/devtools/page/${
-      pageId ?? this.getTargetId(this.primaryPage!)
-    }`;
+    if (!pageId) {
+      if (!this.primaryPage) {
+        throw new Error("Browser or primary page not initialized");
+      }
+      pageId = this.getTargetId(this.primaryPage);
+    }
+    return `${wsProtocol}://${baseUrl}/devtools/page/${pageId}`;
   }
 
   public async refreshPrimaryPage() {
@@ -405,9 +410,18 @@ export class CDPService extends EventEmitter {
           return;
         }
 
-        await page.setRequestInterception(true);
+        // Request interception breaks Cloudflare Turnstile / Service Workers
+        // (blob: importScripts NetworkError). Only enable when we actually need
+        // to block resources (ads / bandwidth optimization / URL patterns).
+        const needsInterception =
+          !!this.launchConfig?.blockAds ||
+          !!this.launchConfig?.optimizeBandwidth ||
+          (this.compiledUrlPatterns?.length ?? 0) > 0;
 
-        page.on("request", (request) => this.handlePageRequest(request, page));
+        if (needsInterception) {
+          await page.setRequestInterception(true);
+          page.on("request", (request) => this.handlePageRequest(request, page));
+        }
 
         page.on("response", (response) => {
           if (response.url().startsWith("file://")) {
@@ -530,7 +544,12 @@ export class CDPService extends EventEmitter {
       this.fingerprintData = null;
       this.currentSessionConfig = null;
       this.browserInstance = null;
+      this.primaryPage = null as any;
       this.wsEndpoint = null;
+      // Force-kill any leftover Chrome on the debug port (no idle browser)
+      try {
+        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
+      } catch {}
       this.emit("close");
       this.shuttingDown = false;
     } catch (error) {
@@ -549,6 +568,10 @@ export class CDPService extends EventEmitter {
       }
 
       this.browserInstance = null;
+      this.primaryPage = null as any;
+      try {
+        execSync("pkill -f 'remote-debugging-port=9222' || true", { stdio: "ignore" });
+      } catch {}
       this.shuttingDown = false;
     }
   }
@@ -557,11 +580,39 @@ export class CDPService extends EventEmitter {
     return this.browserInstance?.process() || null;
   }
 
-  public async createBrowserContext(proxyUrl: string): Promise<BrowserContext> {
+  /** Serialize launches so concurrent scrapes do not race launch/shutdown. */
+  private launchChain: Promise<void> = Promise.resolve();
+
+  public async ensureBrowser(config?: BrowserLauncherOptions): Promise<void> {
+    const merged: BrowserLauncherOptions = {
+      skipFingerprintInjection: true,
+      extensions: ["nopecha-bypass", "recorder"],
+      ...(config || {}),
+      options: {
+        headless: env.CHROME_HEADLESS,
+        ...((config && config.options) || {}),
+      },
+    };
+    const run = async () => {
+      if (this.isRunning() && this.browserInstance) return;
+      await this.launch(merged);
+      if (!this.browserInstance) {
+        throw new Error("Browser instance not initialized after launch");
+      }
+    };
+    this.launchChain = this.launchChain.then(run, run);
+    await this.launchChain;
+  }
+
+  public async createBrowserContext(proxyUrl?: string | null): Promise<BrowserContext> {
+    await this.ensureBrowser();
     if (!this.browserInstance) {
       throw new Error("Browser instance not initialized");
     }
-    return this.browserInstance.createBrowserContext({ proxyServer: proxyUrl });
+    if (proxyUrl) {
+      return this.browserInstance.createBrowserContext({ proxyServer: proxyUrl });
+    }
+    return this.browserInstance.createBrowserContext();
   }
 
   @traceable
@@ -868,7 +919,11 @@ export class CDPService extends EventEmitter {
           "--remote-allow-origins=*",
           "--disable-dev-shm-usage",
           "--disable-gpu",
-          "--disable-features=TranslateUI,BlinkGenPropertyTrees,LinuxNonClientFrame,PermissionPromptSurvey,IsolateOrigins,site-per-process,TouchpadAndWheelScrollLatching,TrackingProtection3pcd,InterestFeedContentSuggestions,PrivacySandboxSettings4,AutofillServerCommunication,OptimizationHints,MediaRouter,DialMediaRouteProvider,CertificateTransparencyComponentUpdater,GlobalMediaControls,AudioServiceOutOfProcess,LazyFrameLoading,AvoidUnnecessaryBeforeUnloadCheckSync,DisableLoadExtensionCommandLineSwitch,DisableDisableExtensionsExceptCommandLineSwitch",
+          "--use-gl=swiftshader",
+          "--enable-webgl",
+          "--ignore-gpu-blocklist",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-features=TranslateUI,PrivacySandboxSettings4,InterestFeedContentSuggestions,MediaRouter,DialMediaRouteProvider,OptimizationHints,DisableLoadExtensionCommandLineSwitch,DisableDisableExtensionsExceptCommandLineSwitch",
           "--enable-features=Clipboard",
           "--no-default-browser-check",
           "--disable-sync",
@@ -915,6 +970,7 @@ export class CDPService extends EventEmitter {
         const headlessArgs = [
           "--headless=new",
           "--hide-crash-restore-bubble",
+          "--disable-gpu",
           "--disable-blink-features=AutomationControlled",
           // can we just remove this outright?
           `--unsafely-treat-insecure-origin-as-secure=http://localhost:3000,http://${env.HOST}:${env.PORT}`,
@@ -1391,16 +1447,24 @@ export class CDPService extends EventEmitter {
   }
 
   @traceable
-  public async endSession(reason: ShutdownReason = ShutdownReason.SESSION_END): Promise<void> {
+  public async endSession(
+    reason: ShutdownReason = ShutdownReason.SESSION_END,
+    options?: { relaunchIdle?: boolean },
+  ): Promise<void> {
     this.logger.info("Ending current session and resetting to default configuration.");
-    const sessionConfig = this.currentSessionConfig!;
+    const sessionConfig = this.currentSessionConfig;
+    const relaunchIdle = options?.relaunchIdle === true;
 
     this.sessionContext = await this.getBrowserState().catch(() => null);
 
     try {
-      await this.pluginManager.onBeforeSessionEnd(sessionConfig);
+      if (sessionConfig) {
+        await this.pluginManager.onBeforeSessionEnd(sessionConfig);
+      }
       await this.shutdown(reason);
-      await this.pluginManager.onSessionEnd(sessionConfig);
+      if (sessionConfig) {
+        await this.pluginManager.onSessionEnd(sessionConfig);
+      }
       this.currentSessionConfig = null;
       this.sessionContext = null;
       this.trackedOrigins.clear();
@@ -1414,21 +1478,36 @@ export class CDPService extends EventEmitter {
         this.logger,
       );
     } finally {
-      await this.pluginManager.onAfterSessionEnd(sessionConfig);
+      if (sessionConfig) {
+        await this.pluginManager.onAfterSessionEnd(sessionConfig);
+      }
     }
 
-    // Relaunch the idle browser
-    await this.launch(this.defaultLaunchConfig);
+    // Relaunch the idle browser (skip for scrape auto-release to free resources)
+    if (relaunchIdle) {
+      await this.launch(this.defaultLaunchConfig);
+    }
   }
 
   private async onDisconnect(): Promise<void> {
     this.logger.info("Browser disconnected. Handling cleanup.");
 
+    // Always clear references. Do NOT auto-relaunch an idle browser —
+    // the next scrape/session will launch when needed.
     if (this.shuttingDown) {
+      this.browserInstance = null;
+      this.primaryPage = null as any;
       return;
     }
 
-    await this.disconnectHandler();
+    this.browserInstance = null;
+    this.primaryPage = null as any;
+    // Optional external handler (e.g. session bookkeeping) — must not relaunch Chrome
+    try {
+      await this.disconnectHandler();
+    } catch (err) {
+      this.logger.warn({ err }, "disconnectHandler error");
+    }
   }
 
   @traceable

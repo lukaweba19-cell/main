@@ -94,34 +94,23 @@ export const handleGetSessionDetails = async (
   reply: FastifyReply,
 ) => {
   const sessionId = request.params.sessionId;
-  if (sessionId !== server.sessionService.activeSession.id) {
+  const active = server.sessionService.activeSession;
+
+  if (sessionId === active.id) {
+    const duration = new Date().getTime() - new Date(active.createdAt).getTime();
     return reply.send({
-      id: sessionId,
-      createdAt: new Date().toISOString(),
-      status: "released",
-      duration: 0,
-      eventCount: 0,
-      timeout: 0,
-      creditsUsed: 0,
-      websocketUrl: getBaseUrl("ws"),
-      debugUrl: getUrl("v1/sessions/debug"),
-      debuggerUrl: getUrl("v1/devtools/inspector.html"),
-      sessionViewerUrl: getBaseUrl(),
-      userAgent: "",
-      isSelenium: false,
-      proxy: "",
-      proxyTxBytes: 0,
-      proxyRxBytes: 0,
-      solveCaptcha: false,
-    } as SessionDetails);
+      ...active,
+      duration,
+    });
   }
 
-  const session = server.sessionService.activeSession;
-  const duration = new Date().getTime() - new Date(session.createdAt).getTime();
-  console.log("duration", duration);
-  return reply.send({
-    ...session,
-    duration,
+  const past = server.sessionService.pastSessions.find((s) => s.id === sessionId);
+  if (past) {
+    return reply.send(past);
+  }
+
+  return reply.code(404).send({
+    message: `Session ${sessionId} not found`,
   });
 };
 
@@ -130,13 +119,18 @@ export const handleGetSessions = async (
   request: FastifyRequest,
   reply: FastifyReply,
 ) => {
-  const currentSession = {
-    ...server.sessionService.activeSession,
-    duration:
-      new Date().getTime() - new Date(server.sessionService.activeSession.createdAt).getTime(),
-  };
-  const pastSessions = server.sessionService.pastSessions;
-  return reply.send({ sessions: [currentSession, ...pastSessions] });
+  // Only include the active session when it is actually live (browser in use).
+  // Idle placeholders after release must NOT appear in the list.
+  const sessions: any[] = [];
+  const active = server.sessionService.activeSession;
+  if (active && active.status === "live") {
+    sessions.push({
+      ...active,
+      duration: new Date().getTime() - new Date(active.createdAt).getTime(),
+    });
+  }
+  sessions.push(...server.sessionService.pastSessions);
+  return reply.send({ sessions });
 };
 
 export const handleGetSessionStream = async (

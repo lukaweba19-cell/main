@@ -9,30 +9,34 @@ interface SessionConsoleProps {
 }
 
 export default function SessionConsole({ id }: SessionConsoleProps) {
-  const [activeTab, setActiveTab] = useState<"details" | "logs" | "dev-tools">(
-    "details"
-  );
+  const [activeTab, setActiveTab] = useState<
+    "details" | "console" | "network" | "dev-tools"
+  >("details");
 
-  const tabs: { value: "details" | "logs" | "dev-tools"; label: string }[] = [
+  const tabs: {
+    value: "details" | "console" | "network" | "dev-tools";
+    label: string;
+  }[] = [
     { value: "details", label: "Details" },
-    { value: "logs", label: "Logs" },
+    { value: "console", label: "Console" },
+    { value: "network", label: "Network" },
     { value: "dev-tools", label: "Dev Tools" },
   ];
 
   return (
-    <div className="flex flex-col w-full h-full">
-      <div className="flex flex-row justify-between items-center bg-[var(--gray-3)] p-2">
+    <div className="flex flex-col w-full h-full min-h-0">
+      <div className="flex flex-row items-center bg-[var(--gray-3)] px-2 border-b border-[var(--gray-6)] shrink-0">
         <Tabs defaultValue="details">
-          <TabsList className="bg-transparent">
+          <TabsList className="bg-transparent h-10">
             {tabs.map((tab) => (
               <TabsTrigger
                 key={tab.value}
                 value={tab.value}
                 onClick={() => setActiveTab(tab.value)}
-                className={`!bg-transparent !box-shadow-none rounded-none p-4 ${
+                className={`!bg-transparent !shadow-none rounded-none px-3 h-10 text-xs ${
                   activeTab === tab.value
-                    ? "border-b-2 border-b-[var(--gray-11)]"
-                    : ""
+                    ? "border-b-2 border-b-[var(--gray-12)] text-[var(--gray-12)]"
+                    : "text-[var(--gray-10)]"
                 }`}
               >
                 {tab.label}
@@ -42,9 +46,16 @@ export default function SessionConsole({ id }: SessionConsoleProps) {
         </Tabs>
       </div>
 
-      {activeTab === "details" && <SessionDetails id={id} />}
-      {activeTab === "logs" && <SessionLogs id={id!} />}
-      {activeTab === "dev-tools" && <SessionDevTools />}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {activeTab === "details" && <SessionDetails id={id} />}
+        {activeTab === "console" && id && (
+          <SessionLogs id={id} filter="console" />
+        )}
+        {activeTab === "network" && id && (
+          <SessionLogs id={id} filter="network" />
+        )}
+        {activeTab === "dev-tools" && <SessionDevTools />}
+      </div>
     </div>
   );
 }
