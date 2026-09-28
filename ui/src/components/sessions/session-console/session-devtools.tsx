@@ -1,11 +1,11 @@
-import { env } from "@/env";
+import { env, toWsUrl } from "@/env";
 import { useEffect, useState } from "react";
 
 export default function SessionDevTools() {
   const [pageId, setPageId] = useState<string | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket(`${env.VITE_API_URL}/v1/sessions/pageId`);
+    const ws = new WebSocket(toWsUrl(env.VITE_WS_URL || env.VITE_API_URL, "/v1/sessions/pageId"));
 
     ws.onmessage = (event) => {
       setPageId(event.data.pageId);

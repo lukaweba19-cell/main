@@ -1,4 +1,4 @@
-import { env } from "@/env";
+import { env, toWsUrl } from "@/env";
 import { useEffect, useState, useRef } from "react";
 import { useSessionsContext } from "@/hooks/use-sessions-context";
 
@@ -84,7 +84,7 @@ export default function SessionLogs({
 
   useEffect(() => {
     if (!isLive) return;
-    const wsUrl = `${env.VITE_WS_URL}/v1/sessions/logs`.replace(/^http/, "ws");
+    const wsUrl = toWsUrl(env.VITE_WS_URL || env.VITE_API_URL, "/v1/sessions/logs");
     const ws = new WebSocket(wsUrl);
     ws.onmessage = (event) => {
       try {
