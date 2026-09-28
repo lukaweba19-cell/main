@@ -59,37 +59,60 @@ function isChallengeTitle(title: string): boolean {
 /**
  * Runs in the page: challenge/content signature of the current DOM.
  *
+ * IMPORTANT: this function is serialized and executed in the browser, so it
+ * must not reference anything from this module's scope — inline all constants.
+ *
  * Challenge detection deliberately ignores script src/urls: Cloudflare leaves
  * challenge-platform/turnstile script tags in the DOM long after the challenge
  * has been solved, and counting them kept scrapes alive for the full timeout.
  */
 function pageSnapshot() {
-  const title = (document.title || "").toLowerCase();
-  const body = (document.body?.innerText || "").trim();
+  var CHALLENGE_TITLES = [
+    "just a moment",
+    "attention required",
+    "security check",
+    "checking your browser",
+    "one more step",
+  ];
+  var CHALLENGE_BODY_PHRASES = [
+    "performing security verification",
+    "checking your browser before accessing",
+    "verify you are human",
+    "confirm you are human",
+    "enable javascript and cookies to continue",
+    "needs to review the security of your connection",
+  ];
+  var CHALLENGE_MAX_CONTENT_CHARS = 300;
 
-  const bodyLower = body.toLowerCase();
-  const challengeByBody =
-    CHALLENGE_BODY_PHRASES.some((s) => bodyLower.includes(s)) &&
-    body.length < 2000; // challenge shells are short; real pages never match
+  var title = (document.title || "").toLowerCase();
+  var body = (document.body?.innerText || "").trim();
+  var bodyLower = body.toLowerCase();
 
-  const challenge =
-    isChallengeTitle(title) ||
-    (challengeByBody && body.length < CHALLENGE_MAX_CONTENT_CHARS);
+  var titleChallenged = CHALLENGE_TITLES.some(function (s) {
+    return title.includes(s);
+  });
+  var bodyChallenged =
+    CHALLENGE_BODY_PHRASES.some(function (s) {
+      return bodyLower.includes(s);
+    }) && body.length < 2000; // challenge shells are short; real pages never match
 
-  const tagCount = document.querySelectorAll(
+  var challenge =
+    titleChallenged || (bodyChallenged && body.length < CHALLENGE_MAX_CONTENT_CHARS);
+
+  var tagCount = document.querySelectorAll(
     "a, p, h1, h2, h3, li, td, th, article, section",
   ).length;
-  const contentChars = body.length;
-  const pendingImages = Array.from(document.images).filter(
-    (img) => !img.complete,
-  ).length;
+  var contentChars = body.length;
+  var pendingImages = Array.from(document.images).filter(function (img) {
+    return !img.complete;
+  }).length;
 
   return {
-    challenge,
+    challenge: challenge,
     title: document.title || "",
-    contentChars,
-    tagCount,
-    pendingImages,
+    contentChars: contentChars,
+    tagCount: tagCount,
+    pendingImages: pendingImages,
     url: window.location.href,
     readyState: document.readyState,
   };
