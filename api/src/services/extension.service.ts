@@ -7,6 +7,42 @@ import { pipeline } from "stream/promises";
 import { env } from "../env.js";
 import https from "https";
 import http from "http";
+import extractZip from "extract-zip";
+
+/**
+ * Extract an uploaded extension archive next to the zip so the launcher's
+ * validation (manifest.json at <extDir>/manifest.json) accepts it and the
+ * browser actually loads it. Chrome rejects flat zips (no wrapping folder),
+ * so unpack directly into the extension directory.
+ */
+async function extractExtensionArchive(destDir: string, zipPath: string): Promise<void> {
+  try {
+    await extractZip(zipPath, { dir: destDir });
+    // Valid uploads put manifest.json at the zip root (possibly inside a single
+    // wrapper folder — flatten that case so the launcher always finds it).
+    const manifestAtRoot = fs.existsSync(path.join(destDir, "manifest.json"));
+    if (!manifestAtRoot) {
+      const entries = fs
+        .readdirSync(destDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory());
+      if (entries.length === 1) {
+        const inner = path.join(destDir, entries[0].name);
+        if (fs.existsSync(path.join(inner, "manifest.json"))) {
+          for (const item of fs.readdirSync(inner)) {
+            fs.renameSync(path.join(inner, item), path.join(destDir, item));
+          }
+          fs.rmSync(inner, { recursive: true, force: true });
+        }
+      }
+    }
+  } catch (err) {
+    // Not a zip (e.g. raw .crx handled elsewhere) or corrupt archive — leave the
+    // file in place; the launcher will skip it with a warning.
+    console.warn(
+      `[extensions] Could not extract ${zipPath}: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
 
 export interface ExtensionMeta {
   id: string;
@@ -86,6 +122,7 @@ export class ExtensionService {
     const zipPath = path.join(destDir, "extension.zip");
     const writeStream = fs.createWriteStream(zipPath);
     await pipeline(fileStream, writeStream);
+    await extractExtensionArchive(destDir, zipPath);
 
     const name = originalName?.replace(/\.(zip|crx)$/i, "") || `extension-${id.slice(0, 8)}`;
 
@@ -124,6 +161,7 @@ export class ExtensionService {
     const zipPath = path.join(destDir, "extension.zip");
     const writeStream = fs.createWriteStream(zipPath);
     await pipeline(fileStream, writeStream);
+    await extractExtensionArchive(destDir, zipPath);
 
     let name = existing.name;
     if (originalName) {
