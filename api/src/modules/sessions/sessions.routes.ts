@@ -42,7 +42,10 @@ async function routes(server: FastifyInstance) {
       if (!server.cdpService.isRunning()) {
         return reply.status(503).send({ status: "service_unavailable" });
       }
-      return reply.send({ status: "ok" });
+      return reply.send({
+        status: "ok",
+        browser: server.cdpService.getBrowserEngine(),
+      });
     },
   );
   server.post(

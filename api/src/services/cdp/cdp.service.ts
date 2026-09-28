@@ -29,6 +29,10 @@ import {
 } from "../../utils/requests.js";
 import { getChromeExecutablePath } from "../../utils/browser.js";
 import {
+  getCloakStealthArgs,
+  resolveBrowser,
+} from "../../utils/resolve-browser.js";
+import {
   deepMerge,
   extractStorageForPageWithTimeout,
   getProfilePath,
@@ -86,6 +90,7 @@ export class CDPService extends EventEmitter {
   private wsEndpoint: string | null;
   private sessionContext: SessionData | null;
   private chromeExecPath: string;
+  private browserEngine: "cloakbrowser" | "chrome";
   private wsProxyServer: httpProxy;
   private primaryPage: PlaywrightPage | null;
   private launchConfig?: BrowserLauncherOptions;
@@ -121,7 +126,17 @@ export class CDPService extends EventEmitter {
     this.browserInstance = null;
     this.wsEndpoint = null;
     this.sessionContext = null;
-    this.chromeExecPath = getChromeExecutablePath();
+    // Prefer the CloakBrowser stealth Chromium when its binary is installed;
+    // fall back to stock Chrome otherwise. Logged on first launch.
+    const resolved = resolveBrowser();
+    this.chromeExecPath = resolved.executablePath;
+    this.browserEngine = resolved.engine;
+    if (resolved.engine === "cloakbrowser") {
+      this.logger.info(
+        `[CDPService] CloakBrowser stealth Chromium detected: ${resolved.executablePath}` +
+          (resolved.version ? ` (v${resolved.version})` : ""),
+      );
+    }
     this.defaultTimezone = env.DEFAULT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
     this.trackedOrigins = new Set<string>();
     this.chromeSessionService = new ChromeContextService(logger);
@@ -182,6 +197,14 @@ export class CDPService extends EventEmitter {
 
   public setChromeExecPath(execPath: string): void {
     this.chromeExecPath = execPath;
+    // An explicit override switches the engine profile back to stock Chrome
+    // unless the path is clearly a cloak cache binary.
+    this.browserEngine = execPath.includes(".cloakbrowser") ? "cloakbrowser" : "chrome";
+  }
+
+  /** Which engine the launcher is configured to use. */
+  public getBrowserEngine(): "cloakbrowser" | "chrome" {
+    return this.browserEngine;
   }
 
   public setProxyWebSocketHandler(
@@ -538,10 +561,18 @@ export class CDPService extends EventEmitter {
 
         const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
 
+        // CloakBrowser's C++ patches are driven by its own flags. When the
+        // stealth binary is in use, pass the same args the official wrapper
+        // would (--fingerprint=<seed>, --fingerprint-platform=windows) so the
+        // patched code paths activate. Its binary tolerates our full arg set.
+        const engineArgs =
+          this.browserEngine === "cloakbrowser" ? getCloakStealthArgs() : [];
+
         const launchArgs = uniq([
           ...staticDefaultArgs,
           ...headfulArgs,
           ...dynamicArgs,
+          ...engineArgs,
           ...(options.args || []),
           ...(env.CHROME_ARGS || []),
         ]).filter((arg) => !env.FILTER_CHROME_ARGS.includes(arg));

@@ -18,8 +18,17 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-3000}"
 NODE_ENV="${NODE_ENV:-production}"
 
-# Prefer google-chrome on this host; fall back to chromium
-if [[ -x /usr/bin/google-chrome ]]; then
+# Prefer the CloakBrowser stealth Chromium when installed (~/.cloakbrowser),
+# then google-chrome, then chromium. Mirrors api/src/utils/resolve-browser.ts.
+CLOAK_BINARY=""
+if [[ -n "${CLOAKBROWSER_BINARY_PATH:-}" && -x "${CLOAKBROWSER_BINARY_PATH}" ]]; then
+  CLOAK_BINARY="${CLOAKBROWSER_BINARY_PATH}"
+elif [[ -d "${HOME}/.cloakbrowser" ]] && [[ "${STEEL_DISABLE_CLOAKBROWSER:-}" != "true" ]]; then
+  CLOAK_BINARY=$(ls -1 "${HOME}"/.cloakbrowser/chromium-*/chrome 2>/dev/null | sort -r | head -1 || true)
+fi
+if [[ -n "${CLOAK_BINARY}" ]]; then
+  CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-${CLOAK_BINARY}}"
+elif [[ -x /usr/bin/google-chrome ]]; then
   CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/google-chrome}"
 elif [[ -x /usr/bin/google-chrome-stable ]]; then
   CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-/usr/bin/google-chrome-stable}"
