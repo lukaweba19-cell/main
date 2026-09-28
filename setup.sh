@@ -168,12 +168,15 @@ start_server() {
   echo "${pid}" > "${PID_FILE}"
   log "Started PID ${pid}"
 
-  # wait for health
+  # wait for the HTTP server to come up.
+  # NOTE: /v1/health returns 503 while the browser is not yet launched — the
+  # browser starts on demand with the first session/scrape, so 503 is a valid
+  # idle state. Wait for the HTTP server itself to respond (any status).
   local max=30
   local i=1
   while [[ $i -le $max ]]; do
-    if curl -sf --max-time 2 "http://127.0.0.1:${PORT}/v1/health" >/dev/null 2>&1; then
-      log "Health check OK (attempt $i)"
+    if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${PORT}/v1/health"; then
+      log "HTTP server is up (attempt $i)"
       curl -s "http://127.0.0.1:${PORT}/v1/health" || true
       echo
       return 0
