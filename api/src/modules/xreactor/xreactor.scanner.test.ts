@@ -110,6 +110,7 @@ describe("harvestLinks", () => {
     const html = `
       <a href="https://t.me/x_d9v">telegram channel</a>
       <a href="https://telegram.me/someone">telegram me</a>
+      <a href="https://telegram.org/dl?tme=abc">telegram app link</a>
       <a href="https://wa.me/123456">whatsapp</a>
       <a href="https://discord.gg/abc">discord invite</a>
       <a href="https://m.me/somepage">messenger</a>
@@ -117,7 +118,7 @@ describe("harvestLinks", () => {
     `;
     const r = harvestLinks(html, base);
     expect(r.candidates.map((c) => c.url)).toEqual(["https://example.com/thread/7"]);
-    expect(r.skipped.ad).toBeGreaterThanOrEqual(5);
+    expect(r.skipped.ad).toBeGreaterThanOrEqual(6);
   });
 
   it("dedupes links and caps at maxLinks", () => {

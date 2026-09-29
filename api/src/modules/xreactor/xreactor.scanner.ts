@@ -81,6 +81,8 @@ const AD_HOST_PATTERNS = [
   // dialogs that stall headful checks. Never follow them.
   "t.me",
   "telegram.me",
+  "telegram.org",
+  "telegram.dog",
   "tx.me",
   "wa.me",
   "whatsapp.com",
