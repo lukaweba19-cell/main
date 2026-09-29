@@ -72,11 +72,12 @@ const CreateSession = z.object({
   persist: z.boolean().optional().describe("Flag to indicate if session should be persisted"),
   userDataDir: z.string().optional().describe("User data directory path to use for the session"),
   profileId: z
-    .string()
-    .uuid()
+    .union([z.string().uuid(), z.literal("")])
     .optional()
+    .nullable()
+    .transform((v) => (v ? v : undefined))
     .describe(
-      "Uploaded profile (/v1/profiles) id to run this session with. Omitted: the durable default profile (persistent fingerprint) is used.",
+      "Uploaded profile (/v1/profiles) id to run this session with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used.",
     ),
   timezone: z.string().optional().describe("Timezone to use for the session"),
   dimensions: z

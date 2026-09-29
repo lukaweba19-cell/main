@@ -17,11 +17,12 @@ const ScrapeRequest = z.object({
     ),
   logUrl: z.string().optional(),
   profileId: z
-    .string()
-    .uuid()
+    .union([z.string().uuid(), z.literal("")])
     .optional()
+    .nullable()
+    .transform((v) => (v ? v : undefined))
     .describe(
-      "Uploaded profile (/v1/profiles) id to run this scrape with. Omitted: the durable default profile (persistent fingerprint) is used.",
+      "Uploaded profile (/v1/profiles) id to run this scrape with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used.",
     ),
 });
 

@@ -2,10 +2,15 @@
 # Full verification for the xreactor capture overhaul. Run ON the VM.
 # Checks: t.me timing, structured network events, real UA in row, disallowed
 # chain via t.me bio links, recording geometry, per-session log isolation.
+# ALSO: hard guarantees — profileId/cfVerify rejected-or-ignored, default
+# profile always used, extensions loaded, no multi-second dead waits.
 set -uo pipefail
 ROOT_DIR="/root/steel-browser"
 TOKEN=$(grep "^XREACTOR_EDGE_TOKEN=" "${ROOT_DIR}/api/.env" | cut -d= -f2- | tr -d '"')
 PORT=3000
+FAIL=0
+ok()   { echo "  PASS  $1"; }
+bad()  { echo "  FAIL  $1"; FAIL=1; }
 
 xr() {
   curl -s --max-time 150 -X POST "http://127.0.0.1:${PORT}/xreactor" \
@@ -21,6 +26,68 @@ d = json.load(open('/tmp/v-single.json'))
 p = d['pages'][0]
 print(f"  result={d['result']} navMs={p['navMs']} readyMs={p['readyMs']} totalMs={d['timings']['totalMs']}")
 PY
+# Timing assertions: nav + ready must be tight (no 6s dead waits).
+python3 - <<'PY'
+import json, os, sys
+d = json.load(open('/tmp/v-single.json'))
+p = d['pages'][0]
+ready = p.get('readyMs') or 0
+nav = p.get('navMs') or 0
+if p['status'] != 'ok':
+    print(f"  FAIL  page status={p['status']} err={p.get('error','')[:80]}"); sys.exit(1)
+if ready > 4000:
+    print(f"  FAIL  readyMs={ready} > 4000 (dead wait regression)"); sys.exit(1)
+print(f"  PASS  timing tight (navMs={nav}, readyMs={ready})")
+PY
+[ $? -ne 0 ] && bad "t.me timing" || ok "t.me timing"
+
+# Unknown/legacy body fields must not break the endpoint (profileId removed).
+xr '{"url":"https://t.me/cracxAds","profileId":"77c70dc0-5792-4825-9c98-2a521825fc16","cfVerify":false}' > /tmp/v-legacy.json
+python3 - <<'PY'
+import json, sys
+d = json.load(open('/tmp/v-legacy.json'))
+if 'message' in d and 'profileId' in str(d.get('message','')):
+    print(f"  FAIL  legacy profileId rejected: {d['message'][:80]}"); sys.exit(1)
+if d.get('pages',[{}])[0].get('status') != 'ok':
+    print(f"  FAIL  legacy-field request failed: {str(d)[:120]}"); sys.exit(1)
+print("  PASS  legacy profileId/cfVerify fields ignored (default profile, cfVerify always on)")
+PY
+[ $? -ne 0 ] && bad "legacy fields" || ok "legacy fields"
+
+# Extensions must actually load into the isolated browser (Chrome 154 path).
+python3 - <<'PY'
+import json, subprocess, sys
+log = open('/root/steel-browser/steel-api.log', 'rb').read()[-200000:].decode('utf-8', 'ignore')
+# nodriver logs "starting" with executable + arguments; extension loading adds
+# --enable-unsafe-extension-debugging when extensions are registered.
+recent = log[log.rfind('nodriver sidecar listening'):]
+if '--enable-unsafe-extension-debugging' in recent:
+    print("  PASS  extension feature flags present in launch args (nodriver add_extension path)")
+else:
+    print("  FAIL  no extension flags in recent launch args — extensions not loaded")
+    sys.exit(1)
+if '--load-extension=' in recent:
+    print("  FAIL  raw --load-extension still present (ignored by Chrome >= 137)")
+    sys.exit(1)
+PY
+[ $? -ne 0 ] && bad "extensions" || ok "extensions"
+
+# Default profile enforcement: launch args must reference a /tmp clone whose
+# source is the durable default profile (xreactor-profile-*), never uploaded.
+python3 - <<'PY'
+import re, sys
+log = open('/root/steel-browser/steel-api.log', 'rb').read()[-200000:].decode('utf-8', 'ignore')
+recent = log[log.rfind('nodriver sidecar listening'):]
+if re.search(r'xreactor-uploaded-', recent):
+    print("  FAIL  uploaded profile materialized — default profile policy violated")
+    sys.exit(1)
+if re.search(r'--user-data-dir=/tmp/xreactor-profile-', recent):
+    print("  PASS  checks run on fresh clones of the durable default profile")
+else:
+    print("  FAIL  no default-profile clone in launch args")
+    sys.exit(1)
+PY
+[ $? -ne 0 ] && bad "default profile" || ok "default profile"
 SID1=$(python3 -c "import json;print(json.load(open('/tmp/v-single.json'))['pages'][0].get('sessionId','none'))" 2>/dev/null || echo none)
 
 echo
@@ -91,3 +158,4 @@ echo "=== 6) Xvfb leftovers ==="
 ps aux | grep '[X]vfb :' | grep -v ':10 ' || echo "  none-extra"
 echo
 echo "verification done"
+[ "$FAIL" = "0" ] || exit 1

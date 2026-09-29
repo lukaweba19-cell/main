@@ -39,9 +39,9 @@ import { acquireXvfbDisplay, type XvfbDisplay } from "./xvfb-display.js";
  * - The browser window fills the display so the recording frame is exactly
  *   the browser.
  *
- * PROFILES: `profileId` selects an uploaded profile (/v1/profiles) as the
- * clone source instead of the default profile; omitted => default profile.
- */
+ * PROFILES: every check always runs on the durable default profile — the
+ * single persistent fingerprint. Callers cannot swap it (that would let a
+ * client escape the seeded external-protocol prefs).
 
 /** Cap on simultaneously live isolated browsers (memory guard for the VM). */
 const maxConcurrent = Math.max(
@@ -57,75 +57,28 @@ export interface IsolatedBrowser {
   close: () => Promise<void>;
 }
 
-export interface LaunchIsolatedOptions {
-  /** Uploaded profile id (ProfileService) to clone instead of the default. */
-  profileId?: string;
-  /** Run nodriver-cf-verify on the seed tab after launch (challenge pages). */
-  cfVerify?: boolean;
-}
-
-/** Uploaded profile meta shape (subset of ProfileService entries). */
-interface StoredProfile {
-  id: string;
-  userDataDir?: string | null; // path to the uploaded userDataDir.zip
-}
-
-/** Materialize an uploaded profile zip into a runnable profile dir. */
-async function materializeUploadedProfile(
-  profileId: string,
-  log: (msg: string) => void,
-): Promise<string | null> {
-  // ProfileService lives on the fastify server; resolve lazily to avoid a
-  // circular import with the routes layer.
-  try {
-    const { ProfileService } = await import("../../services/profile.service.js");
-    const meta: StoredProfile | null = ProfileService.getInstance().get(profileId) as any;
-    if (!meta?.userDataDir || !fs.existsSync(meta.userDataDir)) {
-      log(`[xreactor] profile ${profileId} not found or has no userDataDir; using default profile`);
-      return null;
-    }
-    const dest = path.join("/tmp", `xreactor-uploaded-${randomUUID()}`);
-    fs.mkdirSync(dest, { recursive: true });
-    const { default: extract } = await import("extract-zip");
-    await extract(meta.userDataDir, { dir: dest });
-    // Uploaded archives usually contain the profile CONTENTS; if they packed a
-    // single root folder, unwrap it.
-    const entries = fs.readdirSync(dest);
-    if (entries.length === 1 && fs.statSync(path.join(dest, entries[0])).isDirectory()) {
-      return path.join(dest, entries[0]);
-    }
-    return dest;
-  } catch (err) {
-    log(`[xreactor] materializing profile ${profileId} failed (${err}); using default profile`);
-    return null;
-  }
-}
-
 /**
  * Launches a private nodriver Chrome for one check.
  *
- * - Profile = clone of the durable default profile (or of the uploaded
- *   profile selected by profileId) => persistent fingerprint + persistent
- *   "no external protocol popups" prefs on every single check.
- * - The nopecha extension loads exactly like the main stack.
+ * - Profile = clone of the durable default profile => persistent fingerprint
+ *   + persistent "no external protocol popups" prefs on every single check.
+ *   Non-negotiable: callers cannot substitute another profile.
+ * - Extensions load through nodriver's own extension API (branded Chrome
+ *   >= 137 ignores --load-extension; nodriver injects the feature flags that
+ *   re-enable command-line extension loading).
+ * - nodriver-cf-verify ALWAYS runs on the seed tab (Turnstile auto-solve) —
+ *   not configurable.
  * - When `display` is provided the browser runs on that dedicated Xvfb
  *   screen; otherwise it falls back to the shared DISPLAY.
  */
 export async function launchIsolatedBrowser(
   log: (msg: string) => void,
   display?: XvfbDisplay | null,
-  opts: LaunchIsolatedOptions = {},
 ): Promise<IsolatedBrowser> {
   const resolved = resolveBrowser(); // throws BrowserNotFoundError when missing
 
-  // 1) Profile: uploaded profile if requested+available, else the default clone.
-  let profileDir: string | null = null;
-  if (opts.profileId) {
-    profileDir = await materializeUploadedProfile(opts.profileId, log);
-  }
-  if (!profileDir) {
-    profileDir = cloneDefaultProfile(log);
-  }
+  // Profile: ALWAYS a fresh clone of the durable default profile.
+  const profileDir = cloneDefaultProfile(log);
   // Re-assert the protocol prefs on the working copy (idempotent merge) so a
   // corrupt/older profile can never resurrect the xdg-open dialog.
   writeExternalProtocolPrefs(profileDir, {});
@@ -147,7 +100,7 @@ export async function launchIsolatedBrowser(
       window: [width, height],
       executable: resolved.executablePath,
       extensions: extensionPaths,
-      cfVerify: opts.cfVerify === true,
+      cfVerify: true, // always: Turnstile auto-solve on the seed tab
     }, 90_000);
   } catch (err) {
     fs.rm(profileDir, { recursive: true, force: true }, () => {});
@@ -234,8 +187,8 @@ export async function waitForCheckReady(
   //    never fire `load` promptly: a hanging subresource keeps it pending 9s+
   //    while the DOM is already fully rendered. The snapshot loop below is
   //    the real readiness decider, so this is only a fast-path accelerant:
-  //    3s max, then we start snapshotting whatever is on screen.
-  await page.waitForLoadState("load", { timeout: Math.min(3_000, readyTimeoutMs) }).catch(() => {});
+  //    1.5s max, then we start snapshotting whatever is on screen.
+  await page.waitForLoadState("load", { timeout: Math.min(1_500, readyTimeoutMs) }).catch(() => {});
 
   if (page.isClosed()) {
     return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: false };
@@ -248,13 +201,14 @@ export async function waitForCheckReady(
   }
 
   // 3) Poll: challenges wait to clear; everything else finishes as soon as
-  //    the snapshot is stable (two identical polls ~600ms apart).
+  //    the snapshot is stable (two identical polls 400ms apart => ~0.8s dwell
+  //    for small pages like t.me profiles, down from ~1.8s at 600ms).
   let challengeCleared = false;
   let lastSignature: string | null = null;
   let stableCount = 0;
   const deadline = Date.now() + challengeTimeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 400));
     if (page.isClosed()) break;
     snap = await snapshotPage(page).catch(() => null);
     if (!snap) {

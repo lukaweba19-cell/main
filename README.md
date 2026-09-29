@@ -31,7 +31,8 @@ reuses it:
 
 - sessions & scrapes run on the default profile directly (or `persist: true`),
 - every xreactor check runs on a fresh CLONE of it (temp dir, deleted after),
-- `profileId` (from `/v1/profiles`) switches to an uploaded profile instead.
+- sessions & scrapes can select an uploaded profile with `profileId`
+  (empty/omitted = default); xreactor checks ALWAYS use the default.
 
 Because the same profile directory is reused, any preference the user saves
 ("Always allow", fonts, logins) persists across launches and restarts.
@@ -84,16 +85,18 @@ trackers, social widgets, binaries and non-http schemes are filtered out;
 crawl early. Opening the domain root in a browser redirects to `/xreactor`,
 which serves a Scalar OpenAPI reference scoped to this endpoint.
 
-Optional request fields: `profileId` (run the checks on an uploaded
-/v1/profiles profile instead of the default clone) and `cfVerify: true`
-(run nodriver-cf-verify on Cloudflare Turnstile pages).
+There are no optional tuning fields: every check runs on the durable default
+profile (the single persistent fingerprint, with the seeded external-protocol
+prefs) and always runs nodriver-cf-verify on Cloudflare Turnstile pages.
+Neither is client-configurable — legacy `profileId`/`cfVerify` body fields are
+ignored.
 
 ### Isolation & scale
 
 - Every checked URL runs in its own nodriver-launched Chrome with a fresh
   CLONE of the durable default profile (persistent fingerprint, closed and
-  deleted afterwards) — no shared state, no cross-check pollution. Uploaded
-  profiles can be selected with `profileId`.
+  deleted afterwards) — no shared state, no cross-check pollution. The profile
+  is not selectable: the default profile is the identity for every check.
 - Batch requests (`url` as array or `urls: [...]`, cap 25/request) check all
   URLs **in parallel**, each in its own browser, bounded by
   `XREACTOR_MAX_CONCURRENT` (default 4) to protect VM memory.

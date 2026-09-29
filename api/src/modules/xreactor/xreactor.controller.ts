@@ -110,12 +110,14 @@ async function visitPage(
 
     // Links come from the raw DOM — markdown strips hrefs. JS-rendered pages
     // populate <a> elements after load, so wait (event-driven) until anchors
-    // exist before harvesting; returns early the moment they appear.
+    // exist before harvesting; SHORT cap (1.5s) — genuinely link-less pages
+    // (t.me profiles with only tg:// buttons) fall through fast instead of
+    // burning 6s.
     let candidates: ClassifiedLink[] = [];
     let skipped = EMPTY_SKIPPED;
     if (!isPdf) {
       await page
-        .waitForFunction(() => document.links && document.links.length > 0, { timeout: 6_000 })
+        .waitForFunction(() => document.links && document.links.length > 0, { timeout: 1_500 })
         .catch(() => {}); // genuinely link-less pages just fall through
 
       const rawHtml = await page.content();
@@ -208,7 +210,6 @@ async function crawl(
   log: (msg: string) => void,
   seedUrl: string,
   capture?: XReactorCapture,
-  launchOpts?: { profileId?: string; cfVerify?: boolean },
 ): Promise<XReactorResult> {
   return xreactorBrowserPool.run(async () => {
     const startMs = Date.now();
@@ -227,7 +228,7 @@ async function crawl(
       log(`[xreactor] ${seedUrl} no dedicated display available, using shared DISPLAY`);
     }
 
-    const browser = await launchIsolatedBrowser(log, display, launchOpts);
+    const browser = await launchIsolatedBrowser(log, display);
     launchMs = Date.now() - startMs;
     log(`[xreactor] ${seedUrl} browser launched in ${launchMs}ms`);
 
@@ -384,12 +385,10 @@ export const handleXReactorCheck = async (
 
   const log = (msg: string) => request.log.info(msg);
 
-  // Profile management: profileId selects an uploaded /v1/profiles profile for
-  // every check in this request; omitted => the durable default profile.
-  const launchOpts = {
-    profileId: request.body.profileId,
-    cfVerify: request.body.cfVerify === true,
-  };
+  // Every check runs on the durable default profile (single persistent
+  // fingerprint with the seeded external-protocol prefs) and always runs
+  // nodriver-cf-verify on Turnstile pages. Neither is client-configurable.
+  void request.body;
 
   const sessionService = (request as any).server?.sessionService;
   const cdpService = (request as any).server?.cdpService;
@@ -399,7 +398,7 @@ export const handleXReactorCheck = async (
   try {
     if (normalizedUrls.length === 1) {
       const capture = captureFor(normalizedUrls[0]);
-      const result = await crawl(log, normalizedUrls[0], capture, launchOpts);
+      const result = await crawl(log, normalizedUrls[0], capture);
       return reply.send(result);
     }
 
@@ -411,7 +410,7 @@ export const handleXReactorCheck = async (
       normalizedUrls.map(async (target): Promise<XReactorResult> => {
         const capture = captureFor(target);
         try {
-          return await crawl(log, target, capture, launchOpts);
+          return await crawl(log, target, capture);
         } catch (e: unknown) {
           const error = getErrors(e);
           request.log.warn({ err: error, url: target }, "xreactor batch item failed");

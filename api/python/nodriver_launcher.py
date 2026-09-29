@@ -162,10 +162,11 @@ async def _launch(payload: dict) -> dict:
         *_recommended_args(),
         *(payload.get("browserArgs") or []),
     ]
-    if extensions:
-        joined = ",".join(str(e) for e in extensions)
-        args.append(f"--load-extension={joined}")
-        args.append(f"--disable-extensions-except={joined}")
+    # NOTE: extensions are NOT passed as --load-extension. Branded Chrome
+    # >= 137 ignores that flag entirely; nodriver's Config.add_extension()
+    # routes them properly (it appends DisableLoadExtensionCommandLineSwitch
+    # to --disable-features and --enable-unsafe-extension-debugging).
+    extension_paths = [str(e) for e in extensions]
 
     wrapper: str | None = None
     browser_executable = executable
@@ -186,6 +187,11 @@ async def _launch(payload: dict) -> dict:
         sandbox=False,  # root on the VM; nodriver would auto-disable anyway
         lang=lang,
     )
+    for ext_path in extension_paths:
+        try:
+            config.add_extension(ext_path)
+        except (FileNotFoundError, OSError) as exc:
+            log.warning("extension %s skipped: %s", ext_path, exc)
 
     try:
         # nodriver needs a running loop; the sidecar IS the loop.
