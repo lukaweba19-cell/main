@@ -10,23 +10,39 @@ export type SessionRecorder = {
   stop: () => Promise<string | null>;
 };
 
+export interface SessionRecorderOptions {
+  /** X11 display to grab (":10", ":12", ...). Defaults to the shared DISPLAY env. */
+  display?: string;
+  /** Grab area — should match the browser window size on that display. */
+  width?: number;
+  height?: number;
+}
+
 function ensureRoot() {
   if (!fs.existsSync(ROOT)) fs.mkdirSync(ROOT, { recursive: true });
 }
 
 /**
- * Full continuous video of the browser via ffmpeg x11grab on the Xvfb display.
- * Real H.264 MP4 — no page injection. Started automatically for every session;
- * the file lands in RECORDINGS_DIR and is exposed at
+ * Full continuous video of the browser via ffmpeg x11grab. Real H.264 MP4 —
+ * no page injection. The file lands in RECORDINGS_DIR and is exposed at
  * /v1/sessions/:id/recording/video.
+ *
+ * With no options it grabs the shared DISPLAY at 1920x1080 (the classic
+ * single-browser behavior). Isolated check browsers pass their own dedicated
+ * Xvfb display + window size so concurrent sessions each get a private,
+ * correctly-framed recording.
  */
 export async function startSessionRecorder(
   _page: unknown,
   sessionId: string,
+  opts: SessionRecorderOptions = {},
 ): Promise<SessionRecorder | null> {
   if (!sessionId) return null;
   ensureRoot();
 
+  const display = opts.display || DISPLAY;
+  const width = opts.width ?? 1920;
+  const height = opts.height ?? 1080;
   const outFile = path.join(ROOT, `${sessionId}.mp4`);
   const metaPath = path.join(ROOT, `${sessionId}.json`);
   try {
@@ -37,7 +53,6 @@ export async function startSessionRecorder(
   } catch {}
 
   let proc: ChildProcess | null = null;
-  let stopped = false;
 
   try {
     proc = spawn(
@@ -49,11 +64,11 @@ export async function startSessionRecorder(
         "-f",
         "x11grab",
         "-video_size",
-        "1920x1080",
+        `${width}x${height}`,
         "-framerate",
         "10",
         "-i",
-        `${DISPLAY}.0`,
+        `${display}.0`,
         "-c:v",
         "libx264",
         "-preset",
@@ -85,34 +100,33 @@ export async function startSessionRecorder(
   });
 
   const stop = async (): Promise<string | null> => {
-    if (stopped) return null;
-    stopped = true;
-
-    if (child) {
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (!settled) {
-            settled = true;
-            resolve();
-          }
-        };
-        child.once("close", finish);
-        try {
-          child.kill("SIGINT");
-        } catch {
-          try {
-            child.kill("SIGTERM");
-          } catch {}
-        }
-        setTimeout(() => {
-          try {
-            child.kill("SIGKILL");
-          } catch {}
-          finish();
-        }, 4000);
-      });
+    if (child.exitCode !== null || !child.pid) {
+      // already exited
     }
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      child.once("close", finish);
+      try {
+        child.kill("SIGINT");
+      } catch {
+        try {
+          child.kill("SIGTERM");
+        } catch {}
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+        finish();
+      }, 4000);
+    });
 
     await new Promise((r) => setTimeout(r, 300));
 

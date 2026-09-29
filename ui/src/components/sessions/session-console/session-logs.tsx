@@ -139,6 +139,12 @@ export default function SessionLogs({
       try {
         const base = env.VITE_API_URL.replace(/\/$/, "");
         const params = new URLSearchParams({ limit: "500" });
+        // Prefer the session's own log pageId (captured/isolated sessions tag
+        // every event with it) — without it concurrent sessions would see
+        // each other's lines when their time windows overlap.
+        if (session?.logPageId) {
+          params.set("pageId", session.logPageId);
+        }
         if (session?.createdAt) {
           params.set("startTime", new Date(session.createdAt).toISOString());
         }

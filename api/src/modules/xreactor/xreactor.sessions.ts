@@ -4,18 +4,22 @@ import type { SessionService } from "../../services/session.service.js";
 import type { CDPService } from "../../services/cdp/cdp.service.js";
 import { BrowserEventType } from "../../types/index.js";
 import { startSessionRecorder, type SessionRecorder } from "../../utils/scrape/page-recording.js";
+import type { XvfbDisplay } from "./xvfb-display.js";
 
 /**
  * Full-fidelity capture for isolated xreactor check browsers — the same
  * treatment a regular scrape session gets:
  *
- *   - an ffmpeg x11grab video of the whole check (same recorder /v1/scrape
- *     uses; the isolated browser is headful on the same Xvfb display)
+ *   - an ffmpeg x11grab video of the check on its OWN dedicated Xvfb display
+ *     (concurrent checks each film exactly their own browser — the frame IS
+ *     the browser window, no black bars, no other checks on screen)
  *   - Console / Navigation / Request / Response / RequestFailed / PageError
- *     events recorded into the shared instrumentation log storage under the
- *     check's session id, so the dashboard Console/Network tabs work
- *   - a released session row so the check appears in the sessions list with
- *     its verdict and the recording attached
+ *     events recorded into the shared instrumentation log storage with
+ *     pageId === sessionId. The dashboard passes that id back to
+ *     /v1/logs/query?pageId=... so the Console/Network tabs show ONLY this
+ *     session's events, even when many checks run at once.
+ *   - a released session row (with logPageId + viewport) so the check appears
+ *     in the sessions list with its verdict and the recording attached
  *
  * Capture failures degrade gracefully (check still completes, row shows no
  * video) — capture must never break a compliance check.
@@ -24,6 +28,8 @@ export interface XReactorCapture {
   sessionId: string;
   /** Attach event listeners to the crawl page (call once, before navigating). */
   attach: (page: Page) => void;
+  /** Begin the ffmpeg capture on this check's dedicated display. */
+  startRecorder: () => void;
   /** Stop the video recorder; finalizes the dashboard row. */
   finish: (info: { result: "allowed" | "disallowed"; pagesChecked: number; totalMs: number }) => Promise<void>;
 }
@@ -32,21 +38,23 @@ export function startXReactorCapture(
   sessionService: SessionService,
   cdpService: CDPService,
   seedUrl: string,
+  display?: XvfbDisplay | null,
 ): XReactorCapture {
   const sessionId = randomUUID();
-  const pageId = randomUUID();
   const logger = cdpService.getInstrumentationLogger();
   const createdAt = new Date().toISOString();
   let recorderPromise: Promise<SessionRecorder | null> | null = null;
   let finished = false;
   let durationMs = 0;
 
+  // Events are tagged with the session id itself — the UI queries logs with
+  // pageId=sessionId, so concurrent sessions can never see each other's lines.
   const record = (type: BrowserEventType, data: Record<string, unknown>) => {
     try {
       logger.record({
         type,
         timestamp: new Date().toISOString(),
-        pageId,
+        pageId: sessionId,
         targetType: "page",
         data,
       } as any);
@@ -137,19 +145,32 @@ export function startXReactorCapture(
         sessionViewerUrl: "",
         userAgent: `XReactor: ${info.result.toUpperCase()} — ${seedUrl}`,
         proxy: "",
+        // Dashboard wiring: video panel + per-session log filtering.
+        dimensions: display
+          ? { width: 1440, height: 900 }
+          : undefined,
+        logPageId: sessionId,
+        viewport: { width: 1440, height: 900 },
+        recordingFile: videoFile ? `${sessionId}.mp4` : null,
       });
     } catch {
       // dashboard bookkeeping must never break the check
     }
   };
 
-  // Start the recorder immediately: the isolated browser will appear on the
-  // same Xvfb display moments later, and x11grab records whatever shows up.
-  try {
-    recorderPromise = startSessionRecorder(null, sessionId);
-  } catch {
-    recorderPromise = null;
-  }
+  // Start the recorder on THIS check's dedicated display (falls back to the
+  // shared :10 display when Xvfb is unavailable). Started lazily from the
+  // controller right after the display is acquired.
+  const startRecorder = (): void => {
+    if (recorderPromise) return;
+    try {
+      recorderPromise = display
+        ? startSessionRecorder(null, sessionId, { display: display.display, width: display.width, height: display.height })
+        : startSessionRecorder(null, sessionId);
+    } catch {
+      recorderPromise = null;
+    }
+  };
 
-  return { sessionId, attach, finish };
+  return { sessionId, attach, finish, startRecorder };
 }

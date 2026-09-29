@@ -133,6 +133,14 @@ const SessionDetails = z.object({
     .nonnegative()
     .describe("Amount of data received through the proxy"),
   deviceConfig: deviceConfigSchema,
+  // Dashboard wiring for captured/isolated sessions (xreactor checks):
+  // the pageId their console/network events were recorded under, so the UI
+  // can query /v1/logs/query?pageId=... and show only this session's lines.
+  logPageId: z.string().optional().describe("Instrumentation pageId for this session's log events"),
+  viewport: z
+    .object({ width: z.number(), height: z.number() })
+    .optional()
+    .describe("Recorded browser viewport"),
 });
 
 const ReleaseSession = SessionDetails.merge(

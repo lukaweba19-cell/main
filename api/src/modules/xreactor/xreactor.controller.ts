@@ -19,7 +19,8 @@ import {
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
-import { startXReactorCapture } from "./xreactor.sessions.js";
+import { startXReactorCapture, type XReactorCapture } from "./xreactor.sessions.js";
+import { acquireXvfbDisplay, type XvfbDisplay } from "./xvfb-display.js";
 
 export interface PageVerdict {
   url: string;
@@ -158,34 +159,52 @@ async function visitPage(
 }
 
 /**
- * The crawl for ONE seed URL in its own private browser:
- *   launch isolated CloakBrowser -> capture (video + console/network) ->
+ * The crawl for ONE seed URL in its own private browser on its own private
+ * Xvfb display:
+ *   acquire display -> launch isolated CloakBrowser -> start ffmpeg capture ->
  *   check seed -> follow up to MAX_EXTRA_PAGES links -> stop capture ->
- *   close + delete profile.
+ *   close browser + free the display.
  */
 async function crawl(
   log: (msg: string) => void,
   seedUrl: string,
-  capture?: ReturnType<typeof startXReactorCapture>,
+  capture?: XReactorCapture,
 ): Promise<XReactorResult> {
   return xreactorBrowserPool.run(async () => {
     const startMs = Date.now();
     let launchMs = 0;
-    const browser = await launchIsolatedBrowser(log);
+
+    // Own virtual screen per check: concurrent checks film only themselves.
+    let display: XvfbDisplay | null = null;
+    try {
+      display = await acquireXvfbDisplay();
+    } catch {
+      display = null;
+    }
+    if (display) {
+      log(`[xreactor] ${seedUrl} acquired display ${display.display} (${display.width}x${display.height})`);
+    } else {
+      log(`[xreactor] ${seedUrl} no dedicated display available, using shared DISPLAY`);
+    }
+
+    const browser = await launchIsolatedBrowser(log, display);
     launchMs = Date.now() - startMs;
     log(`[xreactor] ${seedUrl} browser launched in ${launchMs}ms`);
 
     let finalResult: "allowed" | "disallowed" = "allowed";
+    const pages: PageVerdict[] = [];
     try {
       const { page } = browser;
-      if (capture) capture.attach(page);
-      const pages: PageVerdict[] = [];
+      if (capture) {
+        capture.startRecorder(); // films the dedicated display from the start
+        capture.attach(page);
+      }
       const followed: string[] = [];
       const visited = new Set<string>();
       const totals = { ad: 0, binary: 0, foreign: 0, other: 0 };
       let discoveredCount = 0; // links seen on the seed page (before filtering)
       let queue: Array<{ url: string; from: string | null }> = [{ url: seedUrl, from: null }];
-      const finishedPages = () => pages.filter((p) => p.status !== "error").length;
+      const finishedPages = () => pages.filter((p) => p.status === "ok").length;
 
       while (queue.length > 0) {
         if (Date.now() - startMs > CRAWL_TOTAL_BUDGET_MS) {
@@ -224,7 +243,7 @@ async function crawl(
               skippedBinary: totals.binary,
               skippedOther: totals.other + totals.foreign,
             },
-            timings: { totalMs: Date.now() - startMs },
+            timings: { totalMs: Date.now() - startMs, launchMs },
           };
         }
 
@@ -257,12 +276,13 @@ async function crawl(
         await capture
           .finish({
             result: finalResult,
-            pagesChecked: 0, // not available here; recorder stop only needs the verdict
+            pagesChecked: pages.length,
             totalMs: Date.now() - startMs,
           })
           .catch(() => {});
       }
       await browser.close();
+      if (display) display.stop(); // free the virtual screen immediately
     }
   });
 }

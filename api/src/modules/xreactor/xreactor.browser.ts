@@ -14,14 +14,21 @@ import {
   hasRealContent,
 } from "../../utils/scrape/content-ready.js";
 import { ScrapePool } from "../../utils/scrape/scrape-pool.js";
+import { acquireXvfbDisplay, type XvfbDisplay } from "./xvfb-display.js";
 
 /**
  * XReactor runs COMPLETELY outside the Steel session system: every checked
  * URL gets its own throwaway CloakBrowser process with a unique temporary
- * profile, which is closed and deleted afterwards. Nothing is recorded and no
- * sessions appear in the UI. Multiple checks (across and within requests) run
- * simultaneously up to XREACTOR_MAX_CONCURRENT, so a batch of many URLs fans
- * out into parallel browsers instead of queueing on one shared instance.
+ * profile, closed and deleted afterwards.
+ *
+ * TRUE CONCURRENCY with per-check recordings:
+ * - Each check acquires its OWN Xvfb display (:11, :12, ...) and launches its
+ *   browser there, so concurrent checks never share a screen and each video
+ *   films exactly one browser (no cross-contamination, no black bars).
+ * - The shared Steel display (:10) is never touched, so /v1/scrape keeps
+ *   working in parallel with xreactor traffic.
+ * - The browser window is sized to FILL the display so the recording frame
+ *   is exactly the browser (viewport 1440x900 + chrome window decorations).
  */
 
 /** Cap on simultaneously live isolated browsers (memory guard for the VM). */
@@ -33,6 +40,8 @@ export const xreactorBrowserPool = new ScrapePool(maxConcurrent, 30_000);
 
 export interface IsolatedBrowser {
   page: Page;
+  /** Dedicated Xvfb display this browser runs on (null = shared :10 fallback). */
+  display: XvfbDisplay | null;
   close: () => Promise<void>;
 }
 
@@ -43,17 +52,31 @@ export interface IsolatedBrowser {
  *   state, no profile lock contention, fresh fingerprint seed each time.
  * - The nopecha extension loads exactly like in the main stack so challenge
  *   pages still get solved.
+ * - When `display` is provided the browser runs on that dedicated Xvfb screen
+ *   and its window is resized to fill it; otherwise it falls back to the
+ *   shared DISPLAY (recording quality degrades, checks still work).
  */
-export async function launchIsolatedBrowser(log: (msg: string) => void): Promise<IsolatedBrowser> {
+export async function launchIsolatedBrowser(
+  log: (msg: string) => void,
+  display?: XvfbDisplay | null,
+): Promise<IsolatedBrowser> {
   const resolved = resolveBrowser(); // throws BrowserNotFoundError when missing
   const profileDir = path.join(os.tmpdir(), `xreactor-profile-${randomUUID()}`);
   await fs.promises.mkdir(profileDir, { recursive: true });
 
   const extensionPaths = await getExtensionPaths();
+  const width = display?.width ?? 1440;
+  const height = (display?.height ?? 900) - 50; // room for window decorations
+
   const args = [
     ...getCloakStealthArgs(), // --no-sandbox, --fingerprint=<seed>, --fingerprint-platform=linux
     "--test-type", // suppress the --no-sandbox infobar (required as root)
     "--disable-dev-shm-usage", // /tmp shm is tiny; keeps many browsers stable
+    "--disable-session-crashed-bubble",
+    "--hide-crash-restore-bubble",
+    `--window-size=${width},${height}`,
+    "--window-position=0,0",
+    "--start-maximized",
     ...(extensionPaths.length
       ? [
           `--load-extension=${extensionPaths.join(",")}`,
@@ -62,7 +85,9 @@ export async function launchIsolatedBrowser(log: (msg: string) => void): Promise
       : []),
   ];
 
-  log(`[xreactor] launching isolated browser (engine=${resolved.engine}, profile=${profileDir})`);
+  log(
+    `[xreactor] launching isolated browser (engine=${resolved.engine}, profile=${profileDir}, display=${display?.display ?? (process.env.DISPLAY || ":10")})`,
+  );
   const context = await chromium.launchPersistentContext(profileDir, {
     headless: false, // headful on the Xvfb display, same as the main stack
     executablePath: resolved.executablePath,
@@ -73,7 +98,7 @@ export async function launchIsolatedBrowser(log: (msg: string) => void): Promise
     handleSIGINT: false,
     handleSIGTERM: false,
     handleSIGHUP: false,
-    env: { ...process.env, DISPLAY: process.env.DISPLAY || ":10" },
+    env: { ...process.env, DISPLAY: display?.display || (process.env.DISPLAY || ":10") },
   });
 
   const pages = context.pages();
@@ -90,7 +115,7 @@ export async function launchIsolatedBrowser(log: (msg: string) => void): Promise
     fs.rm(profileDir, { recursive: true, force: true }, () => {});
   };
 
-  return { page, close };
+  return { page, display: display ?? null, close };
 }
 
 export { BrowserNotFoundError as XReactorBrowserNotFoundError };

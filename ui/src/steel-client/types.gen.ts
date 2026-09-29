@@ -386,6 +386,17 @@ export type SessionDetails = {
     deviceConfig?: {
         device?: 'desktop' | 'mobile';
     };
+    /**
+     * Instrumentation pageId for this session's log events
+     */
+    logPageId?: string;
+    /**
+     * Recorded browser viewport
+     */
+    viewport?: {
+        width: number;
+        height: number;
+    };
 };
 
 /**
