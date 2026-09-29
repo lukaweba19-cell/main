@@ -18,20 +18,9 @@ import {
   scanTextForCloud,
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
-import type { XReactorRequest } from "./xreactor.schema.js";
+import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
 
-interface PageVerdict {
-  url: string;
-  finalUrl: string | null;
-  status: "ok" | "error" | "skipped";
-  cloudFound: boolean;
-  matches: Array<{ variant: string; excerpt: string }>;
-  markdownChars: number;
-  error?: string;
-  followedFrom: string | null;
-}
-
-interface XReactorResult {
+export interface XReactorResult {
   result: "allowed" | "disallowed";
   seedUrl: string;
   pages: PageVerdict[];
@@ -45,6 +34,17 @@ interface XReactorResult {
   timings: {
     totalMs: number;
   };
+}
+
+interface PageVerdict {
+  url: string;
+  finalUrl: string | null;
+  status: "ok" | "error" | "skipped";
+  cloudFound: boolean;
+  matches: Array<{ variant: string; excerpt: string }>;
+  markdownChars: number;
+  error?: string;
+  followedFrom: string | null;
 }
 
 /**
@@ -223,27 +223,97 @@ async function crawl(
   );
 }
 
+interface SingleResult extends XReactorResult {
+  error?: string;
+}
+
 export const handleXReactorCheck = async (
   sessionService: SessionService,
   browserService: CDPService,
   request: XReactorRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> => {
-  const { url } = request.body;
+  const { url, urls } = request.body;
 
-  const normalized = normalizeUrl(url);
-  if (!normalized) {
-    return reply.code(400).send({ message: `Invalid URL: ${url}` });
+  // Accept one URL or many: `url` as string, `url` as array, or `urls` array.
+  const rawUrls = [
+    ...(Array.isArray(url) ? url : url ? [url] : []),
+    ...(urls ?? []),
+  ];
+
+  if (rawUrls.length === 0) {
+    return reply.code(400).send({ message: "Provide `url` (string or array) or `urls`" });
+  }
+  if (rawUrls.length > MAX_URLS_PER_REQUEST) {
+    return reply
+      .code(400)
+      .send({ message: `Too many URLs (max ${MAX_URLS_PER_REQUEST} per request)` });
   }
 
+  const normalizedUrls: string[] = [];
+  for (const raw of rawUrls) {
+    const normalized = normalizeUrl(raw);
+    if (!normalized) {
+      return reply.code(400).send({ message: `Invalid URL: ${raw}` });
+    }
+    normalizedUrls.push(normalized);
+  }
+
+  const log = (msg: string) => request.log.info(msg);
+
   try {
-    const result = await crawl(
-      sessionService,
-      browserService,
-      (msg) => request.log.info(msg),
-      normalized,
-    );
-    return reply.send(result);
+    // Single URL: exact same response shape as always.
+    if (normalizedUrls.length === 1) {
+      const result = await crawl(sessionService, browserService, log, normalizedUrls[0]);
+      return reply.send(result);
+    }
+
+    // Batch: each URL runs its own full browser session lifecycle, strictly
+    // one at a time (the scrape pool serializes them). A failure on one URL
+    // is captured per-result and never stops the others.
+    const batchStart = Date.now();
+    const results: SingleResult[] = [];
+    for (const target of normalizedUrls) {
+      try {
+        results.push(await crawl(sessionService, browserService, log, target));
+      } catch (e: unknown) {
+        const error = getErrors(e);
+        request.log.warn({ err: error, url: target }, "xreactor batch item failed");
+        results.push({
+          result: "allowed",
+          seedUrl: target,
+          pages: [
+            {
+              url: target,
+              finalUrl: null,
+              status: "error",
+              cloudFound: false,
+              matches: [],
+              markdownChars: 0,
+              followedFrom: null,
+              error,
+            },
+          ],
+          links: { found: 0, followed: [], skippedAds: 0, skippedBinary: 0, skippedOther: 0 },
+          timings: { totalMs: 0 },
+          error,
+        });
+      }
+    }
+
+    return reply.send({
+      results,
+      summary: {
+        total: results.length,
+        allowed: results.filter((r) => r.result === "allowed").length,
+        disallowed: results.filter((r) => r.result === "disallowed").length,
+        pagesErrored: results.reduce(
+          (n, r) => n + r.pages.filter((p) => p.status === "error").length,
+          0,
+        ),
+        totalMs: Date.now() - batchStart,
+      },
+    });
   } catch (e: unknown) {
     const error = getErrors(e);
     return reply.code(500).send({ message: error });
