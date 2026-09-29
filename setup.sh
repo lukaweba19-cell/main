@@ -36,9 +36,13 @@ UI_DIST_PATH="${UI_DIST_PATH:-${ROOT_DIR}/ui/dist}"
 DOMAIN="${DOMAIN:-207.180.29.28:3000}"
 # XReactor endpoint isolation (see api/src/modules/xreactor/xreactor.acl.ts)
 XREACTOR_ALLOWED_HOST="${XREACTOR_ALLOWED_HOST:-xreactor-bot.duckdns.org}"
-XREACTOR_EDGE_TOKEN="${XREACTOR_EDGE_TOKEN:-}"
 export HOST PORT NODE_ENV CHROME_EXECUTABLE_PATH UI_DIST_PATH DOMAIN \
-  XREACTOR_ALLOWED_HOST XREACTOR_EDGE_TOKEN
+  XREACTOR_ALLOWED_HOST
+# Edge token is NOT exported when unset: an empty value would shadow the
+# XREACTOR_EDGE_TOKEN the API loads from api/.env via dotenv.
+if [[ -n "${XREACTOR_EDGE_TOKEN:-}" ]]; then
+  export XREACTOR_EDGE_TOKEN
+fi
 # Browser is always headful on the Xvfb display.
 export DISPLAY="${DISPLAY:-:10}"
 
@@ -169,7 +173,7 @@ start_server() {
     UI_DIST_PATH="${UI_DIST_PATH}" \
     DOMAIN="${DOMAIN}" \
     XREACTOR_ALLOWED_HOST="${XREACTOR_ALLOWED_HOST}" \
-    XREACTOR_EDGE_TOKEN="${XREACTOR_EDGE_TOKEN}" \
+    ${XREACTOR_EDGE_TOKEN:+XREACTOR_EDGE_TOKEN="${XREACTOR_EDGE_TOKEN}"} \
     node build/index.js >> "${LOG_FILE}" 2>&1 &
   local pid=$!
   echo "${pid}" > "${PID_FILE}"
