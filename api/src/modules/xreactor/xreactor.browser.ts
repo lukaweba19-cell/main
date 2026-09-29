@@ -183,9 +183,17 @@ export async function launchIsolatedBrowser(
     if (pid != null) {
       await nodriverClose(pid).catch(() => {});
     }
-    // Best-effort profile cleanup; leftovers are also swept by the
-    // maintenance loop in case the process crashed before cleanup.
-    fs.rm(profileDir!, { recursive: true, force: true }, () => {});
+    // Chrome keeps flushing profile files for a moment after close; retry the
+    // removal briefly so nothing leaks into /tmp (the maintenance sweep stays
+    // as the last-resort janitor for crashed runs).
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await fs.promises.rm(profileDir!, { recursive: true, force: true, maxRetries: 3 });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
   };
 
   return { page, display: display ?? null, close };
