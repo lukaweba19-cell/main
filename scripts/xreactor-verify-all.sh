@@ -54,30 +54,26 @@ print("  PASS  legacy profileId/cfVerify fields ignored (default profile, cfVeri
 PY
 [ $? -ne 0 ] && bad "legacy fields" || ok "legacy fields"
 
-# Extensions must actually load into the isolated browser (Chrome 154 path).
-# nodriver's mechanism = --enable-unsafe-extension-debugging PLUS
-# DisableLoadExtensionCommandLineSwitch inside --disable-features (that combo
-# re-enables --load-extension on branded Chrome >= 137; nodriver then emits
-# --load-extension itself, which is EXPECTED). Anchor on the LAST launch-args
-# block (nodriver logs them under "nodriver.core.browser: starting"), which
-# is always the freshest launch regardless of sidecar restarts.
+# Extensions must ACTUALLY be live in the isolated browser. Proven on Chrome
+# 154: command-line loading (--load-extension, even with the >= 137 grace
+# flags) is dead; the working path is CDP Extensions.loadUnpacked post-launch,
+# which the sidecar performs and reports. Assert from the sidecar's own
+# report line for the freshest launch.
 python3 - <<'PY'
-import sys
+import re, sys
 log = open('/root/steel-browser/steel-api.log', 'rb').read()[-400000:].decode('utf-8', 'ignore')
-idx = log.rfind('INFO nodriver.core.browser: starting')
-if idx < 0:
-    print('  FAIL  no nodriver launch found in recent log')
+# xreactor logs: "nodriver launched chrome pid=... extensions=N loaded / M failed"
+hits = re.findall(r'extensions=(\d+) loaded / (\d+) failed', log)
+if not hits:
+    print('  FAIL  no extension report found in xreactor launch log')
     sys.exit(1)
-recent = log[idx:idx + 4000]
-problems = []
-if '--enable-unsafe-extension-debugging' not in recent:
-    problems.append('--enable-unsafe-extension-debugging missing')
-if 'DisableLoadExtensionCommandLineSwitch' not in recent:
-    problems.append('DisableLoadExtensionCommandLineSwitch missing from --disable-features')
-if problems:
-    print("  FAIL  " + "; ".join(problems))
+loaded, failed = map(int, hits[-1])
+# The sidecar also reports CDP-level failures:
+cdp_fail = re.findall(r'extension load failed: (.+?) \((.{0,120})', log)
+if loaded == 0:
+    print(f'  FAIL  0 extensions loaded (failed={failed})' + (f' e.g. {cdp_fail[-1] if cdp_fail else ""}'))
     sys.exit(1)
-print("  PASS  extension flags correct (nodriver add_extension mechanism active)")
+print(f'  PASS  extensions live in browser: {loaded} loaded, {failed} failed (CDP Extensions.loadUnpacked)')
 PY
 [ $? -ne 0 ] && bad "extensions" || ok "extensions"
 

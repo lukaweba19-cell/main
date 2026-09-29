@@ -92,6 +92,78 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+async def _load_extensions_cdp(
+    port: int, extension_paths: list[str]
+) -> tuple[list[str], list[dict]]:
+    """Load unpacked extensions over the CDP Extensions domain.
+
+    Returns (loaded_extension_ids, failures). The browser-level CDP session
+    is opened directly on the devtools websocket (no nodriver tab needed),
+    matching Chrome's Extensions.loadUnpacked contract: requires
+    --enable-unsafe-extension-debugging and a non-headless... actually works
+    headful-only? No: it works in both, but NEVER with the extension path
+    pointing at a zip — the dir must contain manifest.json.
+    """
+    import base64
+    from urllib.parse import urlparse
+    import websockets
+
+    loaded: list[str] = []
+    failures: list[dict] = []
+
+    # Browser-level endpoint: ws://127.0.0.1:<port>/devtools/browser/<uuid>
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=5
+        ) as resp:
+            version_info = json.loads(resp.read().decode("utf-8"))
+        ws_url = version_info["webSocketDebuggerUrl"]
+    except Exception as exc:
+        return [], [{"path": "*", "error": f"no CDP endpoint: {exc}"}]
+
+    try:
+        conn = await websockets.connect(ws_url, max_size=50 * 1024 * 1024)
+    except Exception as exc:
+        return [], [{"path": "*", "error": f"websocket connect failed: {exc}"}]
+
+    msg_id = 0
+
+    async def cdp_call(method: str, params: dict, timeout: float = 20.0):
+        nonlocal msg_id
+        msg_id += 1
+        this_id = msg_id
+        await conn.send(json.dumps({"id": this_id, "method": method, "params": params}))
+        while True:
+            try:
+                raw = await asyncio.wait_for(conn.recv(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"{method} timed out")
+            data = json.loads(raw)
+            if data.get("id") == this_id:
+                if "error" in data:
+                    raise RuntimeError(data["error"].get("message", str(data["error"])))
+                return data.get("result", {})
+            # events (Target.attachedToTarget etc.) are ignored
+
+    try:
+        for ext_path in extension_paths:
+            try:
+                result = await cdp_call("Extensions.loadUnpacked", {"path": ext_path})
+                ext_id = result.get("id", "")
+                loaded.append(ext_id)
+                log.info("extension loaded via CDP: %s -> %s", ext_path, ext_id)
+            except Exception as exc:
+                failures.append({"path": ext_path, "error": str(exc)[:300]})
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+    return loaded, failures
+
+
 def _resolve_chrome() -> str | None:
     """Best-effort Chrome/Chromium discovery (same order as the Node resolver)."""
     candidates = [
@@ -176,10 +248,13 @@ async def _launch(payload: dict) -> dict:
         *_recommended_args(),
         *cleaned_args,
     ]
-    # NOTE: extensions are NOT passed as --load-extension. Branded Chrome
-    # >= 137 ignores that flag entirely; nodriver's Config.add_extension()
-    # routes them properly (it appends DisableLoadExtensionCommandLineSwitch
-    # to --disable-features and --enable-unsafe-extension-debugging).
+    # NOTE: extensions are NOT passed on the command line at all. Proven on
+    # Google Chrome 154: --load-extension is silently ignored EVEN WITH
+    # --enable-unsafe-extension-debugging + DisableLoadExtensionCommandLineSwitch
+    # (the Chrome >= 137 grace mechanism was removed). The working path is the
+    # CDP Extensions.loadUnpacked call after launch, which requires
+    # --enable-unsafe-extension-debugging to be present. We keep a deduped list
+    # and load them post-launch below.
     seen_ext: set[str] = set()
     extension_paths = []
     for e in [*extensions, *from_browser_args]:
@@ -187,6 +262,8 @@ async def _launch(payload: dict) -> dict:
         if e_str not in seen_ext:
             seen_ext.add(e_str)
             extension_paths.append(e_str)
+    if extension_paths:
+        args.append("--enable-unsafe-extension-debugging")
 
     wrapper: str | None = None
     browser_executable = executable
@@ -207,11 +284,8 @@ async def _launch(payload: dict) -> dict:
         sandbox=False,  # root on the VM; nodriver would auto-disable anyway
         lang=lang,
     )
-    for ext_path in extension_paths:
-        try:
-            config.add_extension(ext_path)
-        except (FileNotFoundError, OSError) as exc:
-            log.warning("extension %s skipped: %s", ext_path, exc)
+    # (deliberately NOT config.add_extension(): that emits --load-extension,
+    # which Chrome >= ~145 ignores outright — see comment above.)
 
     try:
         # nodriver needs a running loop; the sidecar IS the loop.
@@ -232,6 +306,15 @@ async def _launch(payload: dict) -> dict:
         port = int(ws.split("/")[2].rsplit(":", 1)[1])
     except Exception:
         port = 0
+
+    # Load extensions over CDP — the ONLY path that works on branded Chrome
+    # >= ~145 (command-line loading is dead; see the args comment above).
+    loaded_extensions: list[str] = []
+    failed_extensions: list[dict] = []
+    if extension_paths and port:
+        loaded_extensions, failed_extensions = await _load_extensions_cdp(port, extension_paths)
+        for f in failed_extensions:
+            log.warning("extension load failed: %s (%s)", f.get("path"), f.get("error"))
     if not port and pid is not None:
         try:
             with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
@@ -266,6 +349,8 @@ async def _launch(payload: dict) -> dict:
         "pid": pid,
         "port": port,
         "cfVerifyAvailable": CF_VERIFY_AVAILABLE,
+        "extensionsLoaded": loaded_extensions,
+        "extensionsFailed": failed_extensions,
     }
 
 

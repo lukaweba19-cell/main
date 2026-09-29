@@ -112,7 +112,13 @@ export async function launchIsolatedBrowser(
     throw new Error(launch.error || "nodriver launch failed without a CDP endpoint");
   }
   const pid = launch.pid ?? null;
-  log(`[xreactor] nodriver launched chrome pid=${pid} port=${launch.port}`);
+  log(
+    `[xreactor] nodriver launched chrome pid=${pid} port=${launch.port}` +
+      ` extensions=${(launch.extensionsLoaded ?? []).length} loaded / ${(launch.extensionsFailed ?? []).length} failed`,
+  );
+  if (launch.extensionsFailed?.length) {
+    log(`[xreactor] extension load failures: ${JSON.stringify(launch.extensionsFailed)}`);
+  }
 
   // Attach Node to the nodriver-owned browser over CDP.
   const browser = await chromium.connectOverCDP(launch.webSocketDebuggerUrl);

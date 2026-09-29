@@ -1,4 +1,5 @@
 nodriver>=0.38
 aiohttp>=3.9
+websockets>=12
 # Optional Cloudflare Turnstile verification (DOM-based, no OpenCV):
 # installed separately by setup.sh from git+https://github.com/omegastrux/nodriver-cf-verify.git

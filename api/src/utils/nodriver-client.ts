@@ -49,6 +49,10 @@ export interface NodriverLaunchResult {
   pid?: number;
   port?: number;
   error?: string;
+  /** CDP extension ids successfully loaded post-launch (Extensions.loadUnpacked). */
+  extensionsLoaded?: string[];
+  /** Per-path failures from the CDP extension load attempt. */
+  extensionsFailed?: Array<{ path: string; error: string }>;
 }
 
 function sidecarPort(): number {
