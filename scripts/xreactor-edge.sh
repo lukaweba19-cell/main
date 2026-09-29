@@ -46,6 +46,8 @@ if [[ -z "${TOKEN}" ]]; then
 fi
 
 # 2) Caddy site block — replace an existing managed block, or append a new one.
+#    The bare hostname (no scheme) means automatic HTTPS with a cert from
+#    Let's Encrypt AND an automatic HTTP->HTTPS redirect for port 80.
 if [[ ! -f "${CADDYFILE}" ]]; then
   echo "ERROR: Caddyfile not found at ${CADDYFILE}" >&2
   exit 1
@@ -65,9 +67,10 @@ awk -v start="${BLOCK_START}" -v end="${BLOCK_END}" '
 cat >> "${TMP_FILE}" <<EOF
 
 ${BLOCK_START}
-# XReactor endpoint — HTTP only, no TLS provisioning for this hostname.
-# Token is managed by scripts/xreactor-edge.sh; do not edit by hand.
-http://${ALLOWED_HOST} {
+# XReactor endpoint — HTTPS with automatic cert + HTTP->HTTPS redirect
+# (bare hostname site address). Token is managed by scripts/xreactor-edge.sh;
+# do not edit by hand.
+${ALLOWED_HOST} {
     reverse_proxy 127.0.0.1:3000 {
         header_up X-Xreactor-Edge ${TOKEN}
     }

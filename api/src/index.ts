@@ -45,14 +45,14 @@ const setupServer = async () => {
   await server.register(fastifySensible);
   await server.register(fastifyCors, { origin: true });
 
-  // XReactor domain isolation: requests arriving under the xreactor domain
-  // may ONLY reach /xreactor — every other route rejects them. This keeps
-  // sessions/scrape/UI unreachable from that hostname in both directions.
+  // XReactor domain isolation: the xreactor domain serves exactly ONE thing.
+  // Any other path requested under that Host (/, /ui, /v1/*, ...) bounces to
+  // /xreactor, so the domain always lands on the endpoint no matter what the
+  // visitor types. The endpoint itself additionally requires this Host, and
+  // the IP:PORT address can never reach it.
   server.addHook("onRequest", async (request, reply) => {
     if (hostIsXReactor(request.headers.host) && !isXReactorPath(request.raw.url)) {
-      return reply.code(403).send({
-        message: "Forbidden: this route is not available via the xreactor domain",
-      });
+      return reply.code(302).header("location", "/xreactor").send();
     }
   });
 

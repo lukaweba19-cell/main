@@ -75,16 +75,17 @@ or variant of "cloud" appears:
 It also follows up to **3 additional pages** linked from the seed (ads,
 trackers, social widgets, binaries and non-http schemes are filtered out;
 `nofollow`/`sponsored` links are treated as ads). The first cloud hit ends the
-crawl early.
+crawl early. Opening the domain root in a browser redirects to `/xreactor`,
+which shows a small usage page when no `url` parameter is given.
 
 ```bash
 # POST
-curl -X POST http://xreactor-bot.duckdns.org/xreactor \
+curl -X POST https://xreactor-bot.duckdns.org/xreactor \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 
 # GET
-curl 'http://xreactor-bot.duckdns.org/xreactor?url=https://example.com'
+curl 'https://xreactor-bot.duckdns.org/xreactor?url=https://example.com'
 ```
 
 Response:
@@ -105,26 +106,27 @@ The isolation is enforced inside the API itself (`api/src/modules/xreactor/xreac
 
 - `/xreactor` only answers requests whose Host header is
   `xreactor-bot.duckdns.org` (override with `XREACTOR_ALLOWED_HOST`).
-- A global hook rejects every OTHER route (sessions, scrape, UI, CDP, docs)
-  when the request arrives under that same Host — the domain cannot reach any
-  other part of the API, and the IP:3000 address cannot reach `/xreactor`.
-- Optional shared-secret: set `XREACTOR_EDGE_TOKEN` in `api/.env` and have
-  Caddy inject `header_up X-Xreactor-Edge <token>`; this blocks Host-header
-  spoofing straight against the IP. `scripts/xreactor-edge.sh` (run on the
-  VM) wires the token and the Caddy site block automatically.
+- A global hook sends every OTHER path under that Host to `/xreactor` —
+  the domain always lands on the endpoint, no matter what route the visitor
+  types. The IP:3000 address cannot reach `/xreactor` at all.
+- Shared-secret: `XREACTOR_EDGE_TOKEN` in `api/.env` is injected by Caddy
+  (`header_up X-Xreactor-Edge <token>`); this blocks Host-header spoofing
+  straight against the IP. `scripts/xreactor-edge.sh` (run on the VM) wires
+  the token and the Caddy site block automatically.
 
-Caddy site block (in `/etc/caddy/Caddyfile`):
+Caddy site block (in `/etc/caddy/Caddyfile`, managed by the script):
 
 ```caddy
-http://xreactor-bot.duckdns.org {
+xreactor-bot.duckdns.org {
     reverse_proxy 127.0.0.1:3000 {
-        header_up X-XReacto-Edge <token>
+        header_up X-Xreactor-Edge <token>
     }
 }
 ```
 
-The explicit `http://` scheme keeps the site off Caddy's automatic HTTPS —
-HTTPS connections for that hostname fail the TLS handshake, as intended.
+The bare hostname gives automatic HTTPS (Let's Encrypt cert, same as the
+other duckdns sites on the VM) plus an automatic HTTP→HTTPS redirect on
+port 80.
 
 Important: pages that fail to load (network error, challenge that never
 clears) are reported with `"status": "error"` per page and the verdict stays
