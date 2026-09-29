@@ -25,32 +25,120 @@ const USAGE_PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>XReactor — cloud-mention check</title>
+<title>XReactor — API usage</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-    background: #0a0a0b; color: #e4e4e7; font: 16px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  main { max-width: 640px; padding: 2.5rem 1.5rem; }
-  h1 { font-size: 1.4rem; letter-spacing: 0.02em; margin: 0 0 0.5rem; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: #0a0a0b; color: #e4e4e7;
+    font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  main { max-width: 720px; margin: 0 auto; padding: 2.2rem 1.1rem 3.5rem; }
+  h1 { font-size: 1.35rem; letter-spacing: 0.02em; margin: 0 0 0.3rem; }
   h1 span { color: #34d399; }
-  p { color: #a1a1aa; margin: 0.4rem 0; }
-  code { background: #18181b; border: 1px solid #27272a; border-radius: 6px;
-    padding: 0.15rem 0.45rem; color: #93c5fd; word-break: break-all; }
-  .verdict { display: inline-block; margin-top: 1rem; padding: 0.2rem 0.6rem;
-    border-radius: 999px; font-size: 0.8rem; }
-  .allowed { background: rgba(52,211,153,.12); color: #34d399; border: 1px solid rgba(52,211,153,.35); }
-  .disallowed { background: rgba(248,113,113,.12); color: #f87171; border: 1px solid rgba(248,113,113,.35); }
+  .sub { color: #a1a1aa; margin: 0 0 1.6rem; }
+  h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.14em;
+    color: #71717a; margin: 2rem 0 0.8rem; border-bottom: 1px solid #1f1f23; padding-bottom: 0.45rem; }
+  .snippet { position: relative; margin: 0 0 1.1rem; }
+  .lang { position: absolute; top: 0.55rem; right: 0.7rem; font-size: 0.62rem;
+    text-transform: uppercase; letter-spacing: 0.12em; color: #6b7280; pointer-events: none; }
+  pre { margin: 0; background: #121214; border: 1px solid #26262b; border-radius: 10px;
+    padding: 0.95rem 1rem; overflow-x: auto; white-space: pre; font-size: 0.8rem; line-height: 1.55; }
+  code.inline { background: #18181b; border: 1px solid #27272a; border-radius: 6px;
+    padding: 0.1rem 0.4rem; color: #93c5fd; }
+  .c { color: #6b7280; } /* comment */
+  .g { color: #34d399; } /* good */
+  .b { color: #f87171; } /* bad */
+  .pill { display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px;
+    font-size: 0.72rem; margin-right: 0.4rem; }
+  .pill.allowed { background: rgba(52,211,153,.12); color: #34d399; border: 1px solid rgba(52,211,153,.35); }
+  .pill.disallowed { background: rgba(248,113,113,.12); color: #f87171; border: 1px solid rgba(248,113,113,.35); }
+  .row { margin: 0 0 0.55rem; color: #a1a1aa; }
 </style>
 </head>
 <body>
 <main>
   <h1>xreactor <span>/xreactor</span></h1>
-  <p>Checks a URL (plus up to 3 pages it links) for any mention of &quot;cloud&quot; in any spelling.</p>
-  <p>Usage: <code>?url=&lt;page-url&gt;</code></p>
-  <p><a href="/xreactor?url=https://example.com" style="color:#93c5fd">Try it with example.com</a></p>
-  <p style="margin-top:1.2rem">Response:</p>
-  <p><span class="allowed">allowed</span> no cloud mention found</p>
-  <p><span class="disallowed">disallowed</span> cloud mention detected</p>
+  <p class="sub">Send a url — get <span class="pill allowed">allowed</span> or <span class="pill disallowed">disallowed</span> back. Checks the page (plus up to 3 pages it links) for any mention of &quot;cloud&quot; in any spelling.</p>
+
+  <h2>Endpoint</h2>
+  <div class="snippet"><pre>GET  <code class="inline">https://xreactor-bot.duckdns.org/xreactor?url=&lt;page-url&gt;</code>
+POST <code class="inline">https://xreactor-bot.duckdns.org/xreactor</code>   body: {"url": "&lt;page-url&gt;"}</pre></div>
+
+  <h2>Request examples</h2>
+
+  <div class="snippet"><div class="lang">curl — GET</div><pre>curl "https://xreactor-bot.duckdns.org/xreactor?url=https://example.com"</pre></div>
+
+  <div class="snippet"><div class="lang">curl — POST</div><pre>curl -X POST https://xreactor-bot.duckdns.org/xreactor \\
+  -H "Content-Type: application/json" \\
+  -d '{"url": "https://example.com"}'</pre></div>
+
+  <div class="snippet"><div class="lang">php</div><pre>&lt;?php
+$page = urlencode("https://example.com");
+$json = file_get_contents(
+  "https://xreactor-bot.duckdns.org/xreactor?url=" . $page
+);
+$result = json_decode($json, true)["result"];
+
+if ($result === "allowed") {
+  echo "no cloud mention\n";
+} else {
+  echo "cloud mention found\n";
+}</pre></div>
+
+  <div class="snippet"><div class="lang">javascript</div><pre>const res = await fetch("https://xreactor-bot.duckdns.org/xreactor", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ url: "https://example.com" }),
+});
+const data = await res.json();
+console.log(data.result); // <span class="g">allowed</span> | <span class="b">disallowed</span></pre></div>
+
+  <div class="snippet"><div class="lang">python</div><pre>import requests
+
+r = requests.get(
+    "https://xreactor-bot.duckdns.org/xreactor",
+    params={"url": "https://example.com"},
+    timeout=300,
+)
+print(r.json()["result"])  # <span class="g">allowed</span> | <span class="b">disallowed</span></pre></div>
+
+  <h2>Responses</h2>
+
+  <div class="snippet"><div class="lang">200 — no cloud mention</div><pre>{
+  <span class="g">"result": "allowed"</span>,
+  "seedUrl": "https://example.com",
+  "pages": [
+    { "url": "https://example.com", "status": "ok",
+      "cloudFound": false, "matches": [], "markdownChars": 2892,
+      "followedFrom": null }
+  ],
+  "links": {
+    "found": 6,
+    "followed": ["https://example.com/page-2", "…"],
+    "skippedAds": 25, "skippedBinary": 0, "skippedOther": 12
+  },
+  "timings": { "totalMs": 141233 }
+}</pre></div>
+
+  <div class="snippet"><div class="lang">200 — cloud mention found</div><pre>{
+  <span class="b">"result": "disallowed"</span>,
+  "seedUrl": "https://example.com",
+  "pages": [
+    { "url": "https://example.com", "status": "ok",
+      "cloudFound": true,
+      "matches": [
+        { "variant": "cloud*",
+          "excerpt": "…hosted in the <span class="b">cloud</span> with 99.9% uptime…" }
+      ],
+      "markdownChars": 4210, "followedFrom": null }
+  ],
+  "links": { "found": 6, "followed": [], "skippedAds": 3,
+             "skippedBinary": 0, "skippedOther": 9 },
+  "timings": { "totalMs": 38411 }
+}</pre></div>
+
+  <div class="snippet"><div class="lang">400 / 403</div><pre>{"message": "Invalid URL: …"}                                <span class="c"># 400 bad url</span>
+{"message": "Forbidden: /xreactor is only served via the designated domain"}
+                                                             <span class="c"># 403 wrong host</span></pre></div>
 </main>
 </body>
 </html>`;
@@ -92,8 +180,7 @@ async function routes(server: FastifyInstance) {
     async (request, reply) => {
       const url = (request.query as any)?.url as string | undefined;
       if (!url || !url.trim()) {
-        // Browser-friendly landing: opening the domain root redirects here,
-        // so show how to use the endpoint instead of a JSON validation error.
+        // Browser-friendly docs: request examples + response shapes, nothing else.
         reply.type("text/html; charset=utf-8");
         return reply.send(USAGE_PAGE_HTML);
       }
