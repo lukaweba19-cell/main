@@ -12,6 +12,7 @@ import { buildJsonSchemas } from "../utils/schema.js";
 import filesSchemas from "../modules/files/files.schema.js";
 import extensionsSchemas from "../modules/extensions/extensions.schema.js";
 import profilesSchemas from "../modules/profiles/profiles.schema.js";
+import xreactorSchemas from "../modules/xreactor/xreactor.schema.js";
 import { getBaseUrl } from "../utils/url.js";
 
 const SCHEMAS = {
@@ -22,6 +23,7 @@ const SCHEMAS = {
   ...filesSchemas,
   ...extensionsSchemas,
   ...profilesSchemas,
+  ...xreactorSchemas,
 };
 
 export const { schemas, $ref } = buildJsonSchemas(SCHEMAS);

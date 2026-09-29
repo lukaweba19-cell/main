@@ -5,3 +5,4 @@ export { default as filesRoutes } from "./modules/files/files.routes.js";
 export { default as logsRoutes } from "./modules/logs/logs.routes.js";
 export { default as extensionsRoutes } from "./modules/extensions/extensions.routes.js";
 export { default as profilesRoutes } from "./modules/profiles/profiles.routes.js";
+export { default as xreactorRoutes } from "./modules/xreactor/xreactor.routes.js";

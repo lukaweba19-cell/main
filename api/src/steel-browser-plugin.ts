@@ -17,6 +17,7 @@ import {
   sessionsRoutes,
   extensionsRoutes,
   profilesRoutes,
+  xreactorRoutes,
 } from "./routes.js";
 import { fileURLToPath } from "node:url";
 import ejs from "ejs";
@@ -82,6 +83,9 @@ const steelBrowserPlugin: FastifyPluginAsync<SteelBrowserConfig> = async (fastif
   await fastify.register(filesRoutes, { prefix: "/v1" });
   await fastify.register(extensionsRoutes, { prefix: "/v1" });
   await fastify.register(profilesRoutes, { prefix: "/v1" });
+  // /xreactor is intentionally registered at the ROOT (no /v1 prefix) and
+  // enforces its own host isolation; see modules/xreactor/xreactor.acl.ts.
+  await fastify.register(xreactorRoutes);
 
   const enableLogsRoutes = opts.logging?.enableLogsRoutes ?? true;
   if (enableLogsRoutes) {

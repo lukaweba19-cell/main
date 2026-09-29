@@ -8,6 +8,10 @@ import { loggingConfig } from "./config.js";
 import { MB } from "./utils/size.js";
 import path from "node:path";
 import fs from "node:fs";
+import {
+  hostIsXReactor,
+  isXReactorPath,
+} from "./modules/xreactor/xreactor.acl.js";
 
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -40,6 +44,17 @@ function resolveUiDistPath(): string | null {
 const setupServer = async () => {
   await server.register(fastifySensible);
   await server.register(fastifyCors, { origin: true });
+
+  // XReactor domain isolation: requests arriving under the xreactor domain
+  // may ONLY reach /xreactor — every other route rejects them. This keeps
+  // sessions/scrape/UI unreachable from that hostname in both directions.
+  server.addHook("onRequest", async (request, reply) => {
+    if (hostIsXReactor(request.headers.host) && !isXReactorPath(request.raw.url)) {
+      return reply.code(403).send({
+        message: "Forbidden: this route is not available via the xreactor domain",
+      });
+    }
+  });
 
   // Register UI plugin when built UI files are available
   const uiDistPath = resolveUiDistPath();

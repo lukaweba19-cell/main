@@ -59,8 +59,76 @@ curl -s http://127.0.0.1:3000/v1/health
 ./setup.sh test         # smoke test: health + scrape example.com
 ```
 
-The API serves the UI at `http://<host>:3000/ui` (sessions dashboard with
-per-session video review). Recordings land in `/data/recordings/<sessionId>.mp4`.
+## XReactor endpoint (`/xreactor`)
+
+A dedicated compliance endpoint that answers only via the
+`xreactor-bot.duckdns.org` hostname (plain HTTP through Caddy). It takes just
+a `url`, scrapes it to markdown (using the same CloakBrowser session flow as
+`/v1/scrape`, including challenge handling), and reports whether any spelling
+or variant of "cloud" appears:
+
+- Plain `cloud` and word stems (`clouds`, `cloudy`, `cloudflare`, ...)
+- Leetspeak/homoglyphs: `cl0ud`, `c1oud`, `kl0ud`, `c|oud`, cyrillic/greek o
+- Spaced/split: `c loud`, `c-l-o-u-d`, `cl.oud`
+- Related spellings: `kloud`, `cload`
+
+It also follows up to **3 additional pages** linked from the seed (ads,
+trackers, social widgets, binaries and non-http schemes are filtered out;
+`nofollow`/`sponsored` links are treated as ads). The first cloud hit ends the
+crawl early.
+
+```bash
+# POST
+curl -X POST http://xreactor-bot.duckdns.org/xreactor \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}'
+
+# GET
+curl 'http://xreactor-bot.duckdns.org/xreactor?url=https://example.com'
+```
+
+Response:
+
+```json
+{
+  "result": "allowed" | "disallowed",
+  "seedUrl": "...",
+  "pages": [{ "url": "...", "status": "ok", "cloudFound": false, "matches": [], "followedFrom": null }],
+  "links": { "found": 6, "followed": ["..."], "skippedAds": 2, "skippedBinary": 0, "skippedOther": 1 },
+  "timings": { "totalMs": 41234 }
+}
+```
+
+### Domain isolation
+
+The isolation is enforced inside the API itself (`api/src/modules/xreactor/xreactor.acl.ts`):
+
+- `/xreactor` only answers requests whose Host header is
+  `xreactor-bot.duckdns.org` (override with `XREACTOR_ALLOWED_HOST`).
+- A global hook rejects every OTHER route (sessions, scrape, UI, CDP, docs)
+  when the request arrives under that same Host — the domain cannot reach any
+  other part of the API, and the IP:3000 address cannot reach `/xreactor`.
+- Optional shared-secret: set `XREACTOR_EDGE_TOKEN` in `api/.env` and have
+  Caddy inject `header_up X-XReacto-Edge <token>`; this blocks Host-header
+  spoofing straight against the IP.
+
+Caddy site block (in `/etc/caddy/Caddyfile`):
+
+```caddy
+http://xreactor-bot.duckdns.org {
+    reverse_proxy 127.0.0.1:3000 {
+        header_up X-XReacto-Edge <token>
+    }
+}
+```
+
+The explicit `http://` scheme keeps the site off Caddy's automatic HTTPS —
+HTTPS connections for that hostname fail the TLS handshake, as intended.
+
+Important: pages that fail to load (network error, challenge that never
+clears) are reported with `"status": "error"` per page and the verdict stays
+`allowed` (no cloud detected on an unverified page is not a violation) —
+check the per-page status when acting on the result.
 
 Requirements: Node >= 22, Chrome or the CloakBrowser binary, Xvfb on `:10`
 (`DISPLAY=:10`) for headful launches. As root, `--no-sandbox` is added
