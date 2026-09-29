@@ -36,6 +36,10 @@ const XReactorPageVerdict = z.object({
   markdownChars: z.number().int(),
   error: z.string().optional(),
   followedFrom: z.string().nullable(),
+  /** Timing breakdown per page (ms). */
+  navMs: z.number().int().optional(),
+  readyMs: z.number().int().optional(),
+  extractMs: z.number().int().optional(),
 });
 
 /** Result for ONE checked URL (same shape as before). */
@@ -52,6 +56,8 @@ const XReactorSingleResult = z.object({
   }),
   timings: z.object({
     totalMs: z.number().int(),
+    /** Isolated-browser launch cost (ms). */
+    launchMs: z.number().int().optional(),
   }),
   error: z.string().optional(),
 });
