@@ -23,21 +23,56 @@ async function xreactorAcl(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
+ * Collects schema names referenced via #/components/schemas/<Name> anywhere in
+ * a JSON structure, so the docs page can include ONLY the models the xreactor
+ * endpoint actually uses (not every schema registered by the full API).
+ */
+function collectSchemaRefs(node: unknown, found: Set<string>): void {
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectSchemaRefs(item, found));
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (key === "$ref" && typeof value === "string") {
+        const match = value.match(/^#\/components\/schemas\/([^"/]+)$/);
+        if (match) found.add(match[1]);
+      } else {
+        collectSchemaRefs(value, found);
+      }
+    }
+  }
+}
+
+/**
  * Standalone Scalar API-reference page — the same viewer /documentation uses —
- * with an inline OpenAPI spec stripped down to the xreactor endpoint only.
- * Served when GET /xreactor is opened without a url parameter.
+ * with an inline OpenAPI spec stripped down to the xreactor endpoint and its
+ * models only. Served when GET /xreactor is opened without a url parameter.
  */
 function scalarReferenceHtml(server: FastifyInstance): string {
   const full = server.swagger() as {
     paths: Record<string, unknown>;
-    components?: unknown;
+    components?: { schemas?: Record<string, unknown> };
     openapi?: string;
   };
+
+  const xreactorPaths = full.paths["/xreactor"]
+    ? { "/xreactor": full.paths["/xreactor"] }
+    : {};
+
+  // Models section shows only what this endpoint references.
+  const usedSchemas = new Set<string>();
+  collectSchemaRefs(xreactorPaths, usedSchemas);
+  const schemas: Record<string, unknown> = {};
+  for (const name of usedSchemas) {
+    const schema = full.components?.schemas?.[name];
+    if (schema) schemas[name] = schema;
+  }
+
   const spec = {
     openapi: full.openapi ?? "3.0.3",
-    // Only the xreactor endpoint is exposed through this domain.
-    paths: full.paths["/xreactor"] ? { "/xreactor": full.paths["/xreactor"] } : {},
-    components: full.components ?? {},
+    paths: xreactorPaths,
+    components: { schemas },
     servers: [{ url: `https://${xreactorAllowedHost()}` }],
     info: {
       title: "XReactor API",
