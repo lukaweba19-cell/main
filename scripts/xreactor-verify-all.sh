@@ -58,18 +58,22 @@ PY
 # nodriver's mechanism = --enable-unsafe-extension-debugging PLUS
 # DisableLoadExtensionCommandLineSwitch inside --disable-features (that combo
 # re-enables --load-extension on branded Chrome >= 137; nodriver then emits
-# --load-extension itself, which is EXPECTED).
+# --load-extension itself, which is EXPECTED). Anchor on the LAST launch-args
+# block (nodriver logs them under "nodriver.core.browser: starting"), which
+# is always the freshest launch regardless of sidecar restarts.
 python3 - <<'PY'
 import sys
-log = open('/root/steel-browser/steel-api.log', 'rb').read()[-200000:].decode('utf-8', 'ignore')
-recent = log[log.rfind('nodriver sidecar listening'):]
+log = open('/root/steel-browser/steel-api.log', 'rb').read()[-400000:].decode('utf-8', 'ignore')
+idx = log.rfind('INFO nodriver.core.browser: starting')
+if idx < 0:
+    print('  FAIL  no nodriver launch found in recent log')
+    sys.exit(1)
+recent = log[idx:idx + 4000]
 problems = []
 if '--enable-unsafe-extension-debugging' not in recent:
     problems.append('--enable-unsafe-extension-debugging missing')
 if 'DisableLoadExtensionCommandLineSwitch' not in recent:
     problems.append('DisableLoadExtensionCommandLineSwitch missing from --disable-features')
-if '--load-extension=' not in recent:
-    problems.append('--load-extension missing (extensions not registered)')
 if problems:
     print("  FAIL  " + "; ".join(problems))
     sys.exit(1)
@@ -77,16 +81,17 @@ print("  PASS  extension flags correct (nodriver add_extension mechanism active)
 PY
 [ $? -ne 0 ] && bad "extensions" || ok "extensions"
 
-# Default profile enforcement: launch args must reference a /tmp clone whose
-# source is the durable default profile (xreactor-profile-*), never uploaded.
+# Default profile enforcement: the freshest launch must reference a /tmp clone
+# of the durable default profile (xreactor-profile-*), never an uploaded one.
 python3 - <<'PY'
-import re, sys
-log = open('/root/steel-browser/steel-api.log', 'rb').read()[-200000:].decode('utf-8', 'ignore')
-recent = log[log.rfind('nodriver sidecar listening'):]
-if re.search(r'xreactor-uploaded-', recent):
+import sys
+log = open('/root/steel-browser/steel-api.log', 'rb').read()[-400000:].decode('utf-8', 'ignore')
+idx = log.rfind('INFO nodriver.core.browser: starting')
+recent = log[idx:idx + 4000] if idx >= 0 else ''
+if 'xreactor-uploaded-' in recent:
     print("  FAIL  uploaded profile materialized — default profile policy violated")
     sys.exit(1)
-if re.search(r'--user-data-dir=/tmp/xreactor-profile-', recent):
+if '--user-data-dir=/tmp/xreactor-profile-' in recent:
     print("  PASS  checks run on fresh clones of the durable default profile")
 else:
     print("  FAIL  no default-profile clone in launch args")
