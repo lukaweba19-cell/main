@@ -151,6 +151,20 @@ async def _launch(payload: dict) -> dict:
     if not executable:
         return {"ok": False, "error": "could not resolve a Chrome executable"}
 
+    raw_args = list(payload.get("browserArgs") or [])
+    # Extension args coming from Node (session path still builds them) are
+    # converted to nodriver's proper extension API below — branded Chrome
+    # >= 137 ignores --load-extension entirely.
+    from_browser_args: list[str] = []
+    cleaned_args: list[str] = []
+    for arg in raw_args:
+        if arg.startswith("--load-extension="):
+            from_browser_args.extend(a for a in arg.split("=", 1)[1].split(",") if a)
+        elif arg.startswith("--disable-extensions-except="):
+            continue
+        else:
+            cleaned_args.append(arg)
+
     args: list[str] = [
         "--no-first-run",
         "--no-default-browser-check",
@@ -160,13 +174,19 @@ async def _launch(payload: dict) -> dict:
         f"--window-size={int(window[0])},{int(window[1])}",
         "--window-position=0,0",
         *_recommended_args(),
-        *(payload.get("browserArgs") or []),
+        *cleaned_args,
     ]
     # NOTE: extensions are NOT passed as --load-extension. Branded Chrome
     # >= 137 ignores that flag entirely; nodriver's Config.add_extension()
     # routes them properly (it appends DisableLoadExtensionCommandLineSwitch
     # to --disable-features and --enable-unsafe-extension-debugging).
-    extension_paths = [str(e) for e in extensions]
+    seen_ext: set[str] = set()
+    extension_paths = []
+    for e in [*extensions, *from_browser_args]:
+        e_str = str(e)
+        if e_str not in seen_ext:
+            seen_ext.add(e_str)
+            extension_paths.append(e_str)
 
     wrapper: str | None = None
     browser_executable = executable
