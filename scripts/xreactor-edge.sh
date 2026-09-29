@@ -7,7 +7,8 @@
 #      and injects the current token via header_up
 #   3. Validates + reloads Caddy
 #
-# Run from the repo root on the VM:  bash scripts/xreactor-edge.sh
+# Run from the repo root on the VM:  bash scripts/xreactor-edge.sh [--rotate]
+#   --rotate  generate a fresh token even if one already exists
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,16 +18,24 @@ ALLOWED_HOST="${XREACTOR_ALLOWED_HOST:-xreactor-bot.duckdns.org}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+ROTATE=0
+[[ "${1:-}" == "--rotate" ]] && ROTATE=1
+
 # 1) Token in api/.env — generate one if the file or key is missing.
 if [[ ! -f "${ENV_FILE}" ]]; then
   touch "${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
 fi
-if ! grep -q "^XREACTOR_EDGE_TOKEN=" "${ENV_FILE}"; then
-  printf '\n# XReactor edge shared secret (injected by Caddy, verified by the API)\n' >> "${ENV_FILE}"
+if [[ "${ROTATE}" == "1" ]] || ! grep -q "^XREACTOR_EDGE_TOKEN=" "${ENV_FILE}"; then
+  # Replace an existing line (rotation) or append (first run).
+  if grep -q "^XREACTOR_EDGE_TOKEN=" "${ENV_FILE}"; then
+    sed -i '/^XREACTOR_EDGE_TOKEN=/d' "${ENV_FILE}"
+  else
+    printf '\n# XReactor edge shared secret (injected by Caddy, verified by the API)\n' >> "${ENV_FILE}"
+  fi
   echo "XREACTOR_EDGE_TOKEN=$(openssl rand -hex 24)" >> "${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
-  log "Generated new edge token in api/.env"
+  log "Generated new edge token in api/.env (API restart required)"
 fi
 
 # Read the token inside this VM-side script only; it is never printed.
@@ -74,7 +83,12 @@ if ! caddy validate --config "${CADDYFILE}" >/dev/null 2>&1; then
 fi
 
 cp "${CADDYFILE}" "${CADDYFILE}.bak.$(date +%s)"
-mv "${TMP_FILE}" "${CADDYFILE}"
+# Keep ownership/permissions readable by the caddy service user: mktemp files
+# are 600 root-owned, and a reload running as the caddy user would fail with
+# "permission denied" if we swapped the config for such a file.
+cat "${TMP_FILE}" > "${CADDYFILE}"
+rm -f "${TMP_FILE}"
+chmod 644 "${CADDYFILE}"
 
 if command -v caddy >/dev/null 2>&1; then
   caddy validate --config "${CADDYFILE}" 2>&1 | tail -1
