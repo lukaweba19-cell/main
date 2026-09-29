@@ -59,8 +59,14 @@ export interface IsolatedBrowser {
 /**
  * Schemes whose "Open <handler>?" dialogs must never appear: they block the
  * single page and stall the whole check (t.me pages auto-fire tg:// on load).
- * Pre-seeding protocol_handler.excluded_schemes in the profile's Preferences
- * makes Chromium decline these silently — no dialog, no stall.
+ *
+ * Chromium consults TWO pref stores for external protocols:
+ *   - profile.default.Preferences  (protocol_handler.excluded_schemes)
+ *   - profile."Secure Preferences" (protocol_handler + ExcludedSchemes)
+ * Both must be seeded BEFORE first launch, and the values must be real
+ * booleans — Chrome drops numeric-coerced entries silently.
+ * Setting protocol_handler.allow_excluded_schemes=false + excluded entries
+ * makes every prompt auto-decline with no dialog and no dwell.
  */
 const SUPPRESSED_PROTOCOL_SCHEMES = [
   "tg",
@@ -80,19 +86,38 @@ const SUPPRESSED_PROTOCOL_SCHEMES = [
 function seedProfilePreferences(profileDir: string): void {
   try {
     // Before first launch the profile has no dirs; Chromium requires the
-    // Default dir for Default/Preferences to stick.
+    // Default dir for the preference files to be honored.
     fs.mkdirSync(path.join(profileDir, "Default"), { recursive: true });
-    const excluded: Record<string, number> = {};
-    for (const scheme of SUPPRESSED_PROTOCOL_SCHEMES) excluded[scheme] = 1;
-    const prefs = {
-      protocol_handler: { excluded_schemes: excluded },
+    const excluded: Record<string, boolean> = {};
+    for (const scheme of SUPPRESSED_PROTOCOL_SCHEMES) excluded[scheme] = true;
+
+    const basePrefs = {
+      protocol_handler: {
+        allow_excluded_schemes: false,
+        excluded_schemes: excluded,
+      },
       credentials_enable_service: false,
+      credentials_enable_autosignin: false,
       sync_promo: { show_on_first_run_allowed: false },
       distribution: { import_bookmarks: false, make_chrome_default: false },
+      privacy_sandbox: { initiated: false },
     };
+
     fs.writeFileSync(
       path.join(profileDir, "Default", "Preferences"),
-      JSON.stringify(prefs),
+      JSON.stringify(basePrefs),
+    );
+    // "Secure Preferences" is tracked with HMACs for some keys, but unknown
+    // / fresh-profile keys load without enforcement — the exclusion map is
+    // read from it when present.
+    fs.writeFileSync(
+      path.join(profileDir, "Default", "Secure Preferences"),
+      JSON.stringify({
+        protocol_handler: {
+          allow_excluded_schemes: false,
+          excluded_schemes: excluded,
+        },
+      }),
     );
   } catch {
     // Preferences seeding is best-effort; the dialog suppression simply
@@ -167,18 +192,22 @@ export { BrowserNotFoundError as XReactorBrowserNotFoundError };
 
 /**
  * Lightweight page-ready detection for compliance checks — exits the moment
- * REAL CONTENT is present, never before:
+ * the page is actually presentable, never later:
  *
  *   1. `waitForLoadState("load")` rides the browser's load event.
- *   2. One snapshot: content present => done (typical page: 1-2s).
- *   3. Challenge interstitial (or still-rendering page): poll every 300ms and
- *      exit the instant real content shows up. Cloudflare solves trigger a
- *      reload, so "challenge flag gone" is NOT enough — we keep polling
- *      through the reload until the reloaded page actually has text.
+ *   2. Content-rich snapshot (>=200 chars or >=5 tracked tags) => done
+ *      immediately (typical pages: 1-2s).
+ *   3. SMALL pages (t.me profiles are ~45 chars) would never pass a size bar
+ *      and used to burn the whole challenge ceiling — instead they finish as
+ *      soon as the snapshot is STABLE: two consecutive polls with an identical
+ *      title/chars/tags signature and zero challenge flags (~1.5s dwell).
+ *   4. Challenge interstitials keep polling until they clear (Cloudflare
+ *      solves reload the page, so "challenge flag gone" is NOT enough — we
+ *      keep polling through the reload until the reloaded page is presentable).
  *      Transient null snapshots during navigation are retried, never "done".
  *
  * The ceiling (XREACTOR_CHALLENGE_TIMEOUT_MS, default 20s) is only a failure
- * bound for pages that never render content; happy pages leave immediately.
+ * bound for pages that never render; happy pages leave in 1-3 seconds.
  */
 export async function waitForCheckReady(
   page: Page,
@@ -199,29 +228,44 @@ export async function waitForCheckReady(
 
   // 2) Fast path: content already present.
   let snap = await snapshotPage(page).catch(() => null);
-  if (snap && hasRealContent(snap)) {
+  if (snap && !snap.challenge && hasRealContent(snap)) {
     return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: true };
   }
 
-  // 3) Poll until real content exists — challenge solves reload the page, so
-  //    keep polling through the reload and out the other side.
+  // 3) Poll: challenges wait to clear; everything else finishes as soon as
+  //    the snapshot is stable (two identical polls ~600ms apart).
   let challengeCleared = false;
-  let contentReady = false;
+  let lastSignature: string | null = null;
+  let stableCount = 0;
   const deadline = Date.now() + challengeTimeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 600));
     if (page.isClosed()) break;
     snap = await snapshotPage(page).catch(() => null);
-    if (!snap) continue; // navigation in flight — retry, never treat as done
-    if (snap.challenge) continue; // still solving
-    challengeCleared = true;
-    if (hasRealContent(snap)) {
-      contentReady = true;
-      break; // content just appeared — done, zero extra dwell
+    if (!snap) {
+      // navigation in flight — retry, never treat as done
+      lastSignature = null;
+      stableCount = 0;
+      continue;
     }
-    // Challenge cleared but content not rendered yet: keep polling.
+    if (snap.challenge) {
+      challengeCleared = true;
+      lastSignature = null;
+      stableCount = 0;
+      continue; // still solving
+    }
+    const signature = `${snap.title}|${snap.contentChars}|${snap.tagCount}|${snap.readyState}`;
+    if (signature === lastSignature) {
+      stableCount += 1;
+      if (stableCount >= 2 && (snap.contentChars > 0 || snap.tagCount > 0)) {
+        return { waitedMs: Date.now() - start, challengeCleared, contentReady: true };
+      }
+    } else {
+      lastSignature = signature;
+      stableCount = 0;
+    }
   }
-  return { waitedMs: Date.now() - start, challengeCleared, contentReady };
+  return { waitedMs: Date.now() - start, challengeCleared, contentReady: false };
 }
 
 /**

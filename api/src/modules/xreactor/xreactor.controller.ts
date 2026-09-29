@@ -232,12 +232,14 @@ async function crawl(
 
     let finalResult: "allowed" | "disallowed" = "allowed";
     const pages: PageVerdict[] = [];
+    let browserUa = "";
     try {
       const { page } = browser;
       if (capture) {
         capture.startRecorder(display); // films the dedicated display from the start
-        capture.attach(page);
+        await capture.attach(page);
       }
+      browserUa = await page.evaluate(() => navigator.userAgent).catch(() => "");
       const followed: string[] = [];
       const visited = new Set<string>();
       const totals = { ad: 0, binary: 0, foreign: 0, other: 0 };
@@ -317,6 +319,7 @@ async function crawl(
             result: finalResult,
             pagesChecked: pages.length,
             totalMs: Date.now() - startMs,
+            userAgent: browserUa,
           })
           .catch(() => {});
       }

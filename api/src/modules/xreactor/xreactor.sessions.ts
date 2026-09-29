@@ -3,124 +3,146 @@ import type { Page } from "patchright";
 import type { SessionService } from "../../services/session.service.js";
 import type { CDPService } from "../../services/cdp/cdp.service.js";
 import { BrowserEventType } from "../../types/index.js";
+import { attachPageEvents } from "../../services/cdp/instrumentation/page-events.js";
+import { TargetType } from "../../services/cdp/instrumentation/pw-types.js";
 import { startSessionRecorder, type SessionRecorder } from "../../utils/scrape/page-recording.js";
 import type { XvfbDisplay } from "./xvfb-display.js";
 
 /**
- * Full-fidelity capture for isolated xreactor check browsers — the same
- * treatment a regular scrape session gets:
+ * Full-fidelity capture for isolated xreactor check browsers — IDENTICAL to
+ * what a regular /v1/scrape session gets:
  *
+ *   - the SAME instrumentation pipeline (attachPageEvents over a CDP session)
+ *     records Console / Navigation / Request / Response / RequestFailed /
+ *     PageError with the same structured shapes the dashboard expects
+ *     (request.url, response.status, navigation.url, console.text, ...)
+ *   - events are tagged with pageId === sessionId (via __steelPageId, the
+ *     same mechanism the main browser uses), so the dashboard's
+ *     /v1/logs/query?pageId=... shows ONLY this session's lines
  *   - an ffmpeg x11grab video of the check on its OWN dedicated Xvfb display
- *     (concurrent checks each film exactly their own browser — the frame IS
- *     the browser window, no black bars, no other checks on screen)
- *   - Console / Navigation / Request / Response / RequestFailed / PageError
- *     events recorded into the shared instrumentation log storage with
- *     pageId === sessionId. The dashboard passes that id back to
- *     /v1/logs/query?pageId=... so the Console/Network tabs show ONLY this
- *     session's events, even when many checks run at once.
- *   - a released session row (with logPageId + viewport) so the check appears
- *     in the sessions list with its verdict and the recording attached
+ *   - a released session row carrying the browser's REAL user agent, the
+ *     viewport and logPageId — exactly like a scrape session row
  *
  * Capture failures degrade gracefully (check still completes, row shows no
  * video) — capture must never break a compliance check.
  */
 export interface XReactorCapture {
   sessionId: string;
-  /** Attach event listeners to the crawl page (call once, before navigating). */
-  attach: (page: Page) => void;
+  /** Attach the SAME instrumentation the scrape pipeline uses. */
+  attach: (page: Page) => Promise<void>;
   /** Begin the ffmpeg capture on the given dedicated display. */
   startRecorder: (display?: XvfbDisplay | null) => void;
   /** Stop the video recorder; finalizes the dashboard row. */
-  finish: (info: { result: "allowed" | "disallowed"; pagesChecked: number; totalMs: number }) => Promise<void>;
+  finish: (info: {
+    result: "allowed" | "disallowed";
+    pagesChecked: number;
+    totalMs: number;
+    userAgent?: string;
+  }) => Promise<void>;
 }
 
 export function startXReactorCapture(
   sessionService: SessionService,
   cdpService: CDPService,
   seedUrl: string,
-  display?: XvfbDisplay | null,
 ): XReactorCapture {
   const sessionId = randomUUID();
   const logger = cdpService.getInstrumentationLogger();
   const createdAt = new Date().toISOString();
   let recorderPromise: Promise<SessionRecorder | null> | null = null;
   let finished = false;
-  let durationMs = 0;
-  // The dedicated display is acquired inside crawl() AFTER the capture object
-  // exists, so it is injected via startRecorder(display) and reused for the
-  // dashboard row metadata.
   let usedDisplay: XvfbDisplay | null = null;
 
-  // Events are tagged with the session id itself — the UI queries logs with
-  // pageId=sessionId, so concurrent sessions can never see each other's lines.
-  const record = (type: BrowserEventType, data: Record<string, unknown>) => {
+  const startRecorder = (display?: XvfbDisplay | null): void => {
+    if (recorderPromise) return;
+    usedDisplay = display ?? null;
     try {
-      logger.record({
-        type,
-        timestamp: new Date().toISOString(),
-        pageId: sessionId,
-        targetType: "page",
-        data,
-      } as any);
+      recorderPromise = usedDisplay
+        ? startSessionRecorder(null, sessionId, {
+            display: usedDisplay.display,
+            width: usedDisplay.width,
+            height: usedDisplay.height,
+          })
+        : startSessionRecorder(null, sessionId);
     } catch {
-      // logging must never break the check
+      recorderPromise = null;
     }
   };
 
-  const attach = (page: Page): void => {
-    page.on("console", (msg) =>
-      record(BrowserEventType.Console, {
-        type: msg.type(),
-        text: msg.text(),
-        location: msg.location(),
-        page: { url: page.url() },
-      }),
-    );
-    page.on("pageerror", (err) =>
-      record(BrowserEventType.PageError, {
-        message: String(err?.message || err),
-        page: { url: page.url() },
-      }),
-    );
-    page.on("framenavigated", (frame) => {
-      if (frame.parentFrame()) return;
-      record(BrowserEventType.Navigation, {
-        url: frame.url(),
-        page: { url: frame.url() },
+  const attach = async (page: Page): Promise<void> => {
+    // Preferred path: the exact instrumentation the main browser pipeline
+    // uses (CDP Network/Runtime/Log domains => structured request/response/
+    // navigation/console records). The page is tagged with __steelPageId =
+    // sessionId — the same mechanism the shared browser uses — so every
+    // event lands under this check's session id.
+    try {
+      const session = await page.context().newCDPSession(page);
+      await session.send("Runtime.enable").catch(() => {});
+      await session.send("Network.enable").catch(() => {});
+      await session.send("Log.enable").catch(() => {});
+      (page as unknown as { __steelPageId?: string }).__steelPageId = sessionId;
+      attachPageEvents(page, session, logger, TargetType.PAGE, {});
+      return;
+    } catch {
+      // fall through to the page-level fallback below
+    }
+
+    // Fallback: same structured event shapes, page-level listeners only.
+    const record = (type: BrowserEventType, payload: Record<string, unknown>) => {
+      try {
+        logger.record({
+          type,
+          timestamp: new Date().toISOString(),
+          pageId: sessionId,
+          targetType: "page",
+          ...payload,
+        } as any);
+      } catch {
+        // logging must never break the check
+      }
+    };
+    try {
+      page.on("console", (msg) =>
+        record(BrowserEventType.Console, {
+          console: { level: msg.type(), text: msg.text(), loc: msg.location() },
+        }),
+      );
+      page.on("pageerror", (err) =>
+        record(BrowserEventType.PageError, { error: { message: String(err?.message || err) } }),
+      );
+      page.on("framenavigated", (frame) => {
+        if (frame.parentFrame()) return;
+        record(BrowserEventType.Navigation, { navigation: { url: frame.url() } });
       });
-    });
-    page.on("request", (req) =>
-      record(BrowserEventType.Request, {
-        url: req.url(),
-        method: req.method(),
-        resourceType: req.resourceType(),
-        page: { url: page.url() },
-      }),
-    );
-    page.on("response", (res) =>
-      record(BrowserEventType.Response, {
-        url: res.url(),
-        status: res.status(),
-        page: { url: page.url() },
-      }),
-    );
-    page.on("requestfailed", (req) =>
-      record(BrowserEventType.RequestFailed, {
-        url: req.url(),
-        failure: req.failure()?.errorText ?? "failed",
-        page: { url: page.url() },
-      }),
-    );
+      page.on("request", (req) =>
+        record(BrowserEventType.Request, {
+          request: { method: req.method(), url: req.url(), resourceType: req.resourceType() },
+        }),
+      );
+      page.on("response", (res) =>
+        record(BrowserEventType.Response, {
+          response: { status: res.status(), url: res.url() },
+        }),
+      );
+      page.on("requestfailed", (req) =>
+        record(BrowserEventType.RequestFailed, {
+          error: { message: req.failure()?.errorText ?? "failed", url: req.url() },
+        }),
+      );
+      record(BrowserEventType.Navigation, { navigation: { url: page.url() } });
+    } catch {
+      // capture must never break the check
+    }
   };
 
   const finish = async (info: {
     result: "allowed" | "disallowed";
     pagesChecked: number;
     totalMs: number;
+    userAgent?: string;
   }): Promise<void> => {
     if (finished) return;
     finished = true;
-    durationMs = info.totalMs;
 
     let videoFile: string | null = null;
     if (recorderPromise) {
@@ -147,9 +169,10 @@ export function startXReactorCapture(
         debugUrl: "",
         debuggerUrl: "",
         sessionViewerUrl: "",
-        userAgent: `XReactor: ${info.result.toUpperCase()} — ${seedUrl}`,
+        // The browser's REAL user agent — same field a scrape session row
+        // fills. The verdict lives in the API response, not here.
+        userAgent: info.userAgent ?? "",
         proxy: "",
-        // Dashboard wiring: video panel + per-session log filtering.
         dimensions: usedDisplay ? { width: 1440, height: 900 } : undefined,
         logPageId: sessionId,
         viewport: { width: 1440, height: 900 },
@@ -160,24 +183,5 @@ export function startXReactorCapture(
     }
   };
 
-  // Start the recorder on THIS check's dedicated display (falls back to the
-  // shared :10 display when Xvfb is unavailable). Called from crawl() right
-  // after the display is acquired and before the browser navigates.
-  const startRecorder = (display?: XvfbDisplay | null): void => {
-    if (recorderPromise) return;
-    usedDisplay = display ?? null;
-    try {
-      recorderPromise = usedDisplay
-        ? startSessionRecorder(null, sessionId, {
-            display: usedDisplay.display,
-            width: usedDisplay.width,
-            height: usedDisplay.height,
-          })
-        : startSessionRecorder(null, sessionId);
-    } catch {
-      recorderPromise = null;
-    }
-  };
-
-  return { sessionId, attach, finish, startRecorder };
+  return { sessionId, attach, startRecorder, finish };
 }
