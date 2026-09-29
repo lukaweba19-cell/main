@@ -17,10 +17,10 @@ const ScrapeRequest = z.object({
     ),
   logUrl: z.string().optional(),
   profileId: z
-    .union([z.string().uuid(), z.literal("")])
-    .optional()
-    .nullable()
-    .transform((v) => (v ? v : undefined))
+    .preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v ?? undefined),
+      z.string().uuid().optional(),
+    )
     .describe(
       "Uploaded profile (/v1/profiles) id to run this scrape with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used.",
     ),
