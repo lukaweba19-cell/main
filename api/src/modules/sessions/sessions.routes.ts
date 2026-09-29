@@ -52,6 +52,13 @@ async function routes(server: FastifyInstance) {
   server.post(
     "/sessions",
     {
+      preValidation: async (request) => {
+        // JSON null profileId => "" ("default profile") before validation.
+        const body = request.body as any;
+        if (body && typeof body === "object" && body.profileId === null) {
+          body.profileId = "";
+        }
+      },
       schema: {
         operationId: "launch_browser_session",
         description: "Launch a browser session",

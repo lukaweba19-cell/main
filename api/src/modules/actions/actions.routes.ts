@@ -3,10 +3,18 @@ import { handlePDF, handleScrape, handleScreenshot, handleSearch } from "./actio
 import { $ref } from "../../plugins/schemas.js";
 import { PDFRequest, ScrapeRequest, ScreenshotRequest, SearchRequest } from "./actions.schema.js";
 
+/** JSON null profileId => "" ("default profile") before schema validation. */
+function nullProfileIdToEmpty(body: unknown): void {
+  if (body && typeof body === "object" && (body as any).profileId === null) {
+    (body as any).profileId = "";
+  }
+}
+
 async function routes(server: FastifyInstance) {
   server.post(
     "/scrape",
     {
+      preValidation: async (request) => nullProfileIdToEmpty(request.body),
       schema: {
         operationId: "scrape",
         description: "Scrape a URL",

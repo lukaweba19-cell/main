@@ -16,13 +16,15 @@ const ScrapeRequest = z.object({
       "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
   logUrl: z.string().optional(),
-  // "" (Scalar's try-it default) and null mean "default profile" — the union
-  // must stay schema-visible: Fastify validates the JSON schema BEFORE any
-  // zod transform runs, so z.preprocess alone would still 400 on "".
+  // "" (Scalar's try-it default) means "default profile". The union must stay
+  // schema-visible: Fastify validates the JSON schema BEFORE any zod transform
+  // runs. JSON null is normalized to "" by the preValidation hook on the
+  // route (zod renders ZodNull as {enum,nullable} without a type, which Ajv
+  // strict mode rejects at schema-build time).
   profileId: z
     .union([z.string().uuid(), z.literal("")])
-    .nullish()
-    .transform((v) => (typeof v === "string" && v ? v : undefined))
+    .optional()
+    .transform((v) => (v ? v : undefined))
     .describe(
       "Uploaded profile (/v1/profiles) id to run this scrape with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used.",
     ),
