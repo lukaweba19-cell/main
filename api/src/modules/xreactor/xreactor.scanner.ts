@@ -19,10 +19,12 @@
 export const MAX_EXTRA_PAGES = 3;
 /** Max candidate links harvested from any single page. */
 export const MAX_LINKS_PER_PAGE = 12;
-/** Hard wall-clock budget for the whole crawl (ms). */
-export const CRAWL_TOTAL_BUDGET_MS = 240_000;
-/** Per-page navigation + content budget (ms). */
-export const PER_PAGE_TIMEOUT_MS = 75_000;
+/** Hard wall-clock budget for the whole crawl (ms) — a failure ceiling only,
+ * happy crawls finish far under it. */
+export const CRAWL_TOTAL_BUDGET_MS = 120_000;
+/** Per-page navigation failure ceiling (ms) — the ready check itself is
+ * event-driven and typically takes 1-2s. */
+export const PER_PAGE_TIMEOUT_MS = 45_000;
 
 const AD_HOST_PATTERNS = [
   "doubleclick",
