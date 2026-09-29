@@ -16,6 +16,8 @@ import {
   PER_PAGE_TIMEOUT_MS,
   harvestLinks,
   scanTextForCloud,
+  isAdLikeExported as isAdLike,
+  isBinaryLikeExported as isBinaryLike,
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
@@ -120,6 +122,43 @@ async function visitPage(
       const harvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
       candidates = harvest.candidates;
       skipped = harvest.skipped;
+
+      // Telegram profile pages (t.me/<channel>) put the channel's advertised
+      // link in the BIO TEXT, not in an anchor — and the page's only DOM
+      // anchors are app-install/protocol links (telegram.org/dl, tg://).
+      // Telegram's own widget shows the same URL as a clickable "preview
+      // link", so treat every http(s) URL found in the page text as a real
+      // candidate, ahead of the (usually empty) DOM-anchor set.
+      try {
+        const pageUrl = new URL(verdict.finalUrl || url);
+        if (/(^|\.)t\.me$/.test(pageUrl.hostname)) {
+          const bodyText = await page
+            .evaluate(() => document.body?.innerText || "")
+            .catch(() => "");
+          const baseKey = pageUrl.toString().replace(/\/$/, "");
+          const seen = new Set(candidates.map((c) => c.url.replace(/\/$/, "")));
+          for (const m of String(bodyText).matchAll(/https?:\/\/[^\s<>()\"'）]+/g)) {
+            let parsed: URL;
+            try {
+              parsed = new URL(m[0].replace(/[).,;'\"]+$/, ""));
+            } catch {
+              continue;
+            }
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+            if (isAdLike(parsed) || isBinaryLike(parsed)) {
+              skipped.ad += 1;
+              continue;
+            }
+            const key = parsed.toString().replace(/\/$/, "");
+            if (key === baseKey || seen.has(key)) continue;
+            seen.add(key);
+            // Bio links are the channel's primary advertised destination.
+            candidates.unshift({ url: key, text: "telegram-bio-link" });
+          }
+        }
+      } catch {
+        // best-effort enrichment
+      }
     }
 
     t = Date.now();
