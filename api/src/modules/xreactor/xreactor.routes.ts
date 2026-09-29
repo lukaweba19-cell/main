@@ -134,30 +134,19 @@ async function routes(server: FastifyInstance) {
       handleXReactorCheck(server.sessionService, server.cdpService, request, reply),
   );
 
+  // GET serves ONLY the docs view (hidden from the OpenAPI spec). The check
+  // itself is POST-only; every GET on /xreactor — with or without ?url= —
+  // shows the Scalar reference page.
   server.get(
     "/xreactor",
     {
       schema: {
-        operationId: "xreactor_check_get",
-        description: "GET variant of the xreactor check: pass ?url=...",
-        tags: ["XReactor"],
-        summary: "Cloud-mention compliance check (GET variant)",
+        hide: true,
       },
     },
-    async (request, reply) => {
-      const url = (request.query as any)?.url as string | undefined;
-      if (!url || !url.trim()) {
-        // OpenAPI reference view (Scalar), scoped to the xreactor endpoint.
-        reply.type("text/html; charset=utf-8");
-        return reply.send(scalarReferenceHtml(server));
-      }
-      (request as any).body = { url };
-      return handleXReactorCheck(
-        server.sessionService,
-        server.cdpService,
-        request as unknown as XReactorRequest,
-        reply,
-      );
+    async (_request, reply) => {
+      reply.type("text/html; charset=utf-8");
+      return reply.send(scalarReferenceHtml(server));
     },
   );
 }
