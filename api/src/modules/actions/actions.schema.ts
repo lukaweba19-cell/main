@@ -16,6 +16,13 @@ const ScrapeRequest = z.object({
       "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, the host's own IP is used.",
     ),
   logUrl: z.string().optional(),
+  profileId: z
+    .string()
+    .uuid()
+    .optional()
+    .describe(
+      "Uploaded profile (/v1/profiles) id to run this scrape with. Omitted: the durable default profile (persistent fingerprint) is used.",
+    ),
 });
 
 const ScrapeResponse = z.object({

@@ -18,19 +18,88 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-3000}"
 NODE_ENV="${NODE_ENV:-production}"
 
-# CloakBrowser-only: resolve the stealth Chromium, or fail with instructions.
-# Stock Chrome/Chromium is not supported in this deployment.
-CLOAK_BINARY=""
-if [[ -n "${CLOAKBROWSER_BINARY_PATH:-}" && -x "${CLOAKBROWSER_BINARY_PATH}" ]]; then
-  CLOAK_BINARY="${CLOAKBROWSER_BINARY_PATH}"
-elif [[ -d "${HOME}/.cloakbrowser" ]]; then
-  CLOAK_BINARY=$(ls -1 "${HOME}"/.cloakbrowser/chromium-*/chrome 2>/dev/null | sort -r | head -1 || true)
+# nodriver stack: resolve the Chrome/Chromium binary the Python sidecar will
+# launch, installing Google Chrome if nothing is present.
+CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-}"
+if [[ -z "${CHROME_EXECUTABLE_PATH}" ]]; then
+  for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      CHROME_EXECUTABLE_PATH="$(command -v "${candidate}")"
+      break
+    fi
+  done
 fi
-if [[ -z "${CLOAK_BINARY}" ]]; then
-  err "CloakBrowser binary not found (~/.cloakbrowser). Install with: npx cloakbrowser install"
-  exit 1
+if [[ -z "${CHROME_EXECUTABLE_PATH}" ]] || [[ ! -x "${CHROME_EXECUTABLE_PATH}" ]]; then
+  log "No Chrome/Chromium found — installing Google Chrome stable..."
+  if command -v apt-get >/dev/null 2>&1; then
+    wget -qO /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" \
+      || err "Chrome download failed"
+    apt-get install -y /tmp/google-chrome.deb >/dev/null || apt-get -f install -y >/dev/null
+    rm -f /tmp/google-chrome.deb
+    CHROME_EXECUTABLE_PATH="$(command -v google-chrome || echo /usr/bin/google-chrome)"
+  else
+    err "No Chrome found and apt-get unavailable. Set CHROME_EXECUTABLE_PATH."
+    exit 1
+  fi
 fi
-CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-${CLOAK_BINARY}}"
+
+# --- External-protocol popup kill (the "Open xdg-open?" dialog) ------------
+# Two OS-level backstops so NO chromium build can ever show the dialog:
+#   1. Enterprise policy AutoLaunchProtocolsFromOrigins (machine JSON; read by
+#      external_protocol_handler BEFORE the dialog) auto-allows the schemes
+#      from any web origin.
+#   2. An xdg-open shim: if a launch still slips through, xdg-open exits 0
+#      instantly instead of opening/stalling a real handler.
+install_popup_backstops() {
+  local policy_dir="/etc/opt/chrome/policies/managed"
+  mkdir -p "${policy_dir}"
+  cat > "${policy_dir}/steel-external-protocols.json" <<'POLICY'
+{
+  "AutoLaunchProtocolsFromOrigins": [
+    { "protocol": "tg", "allowed_origins": ["*"] },
+    { "protocol": "whatsapp", "allowed_origins": ["*"] },
+    { "protocol": "viber", "allowed_origins": ["*"] },
+    { "protocol": "skype", "allowed_origins": ["*"] },
+    { "protocol": "slack", "allowed_origins": ["*"] },
+    { "protocol": "zoommtg", "allowed_origins": ["*"] },
+    { "protocol": "discord", "allowed_origins": ["*"] },
+    { "protocol": "webcal", "allowed_origins": ["*"] },
+    { "protocol": "steam", "allowed_origins": ["*"] },
+    { "protocol": "spotify", "allowed_origins": ["*"] },
+    { "protocol": "mailto", "allowed_origins": ["*"] },
+    { "protocol": "tel", "allowed_origins": ["*"] },
+    { "protocol": "sms", "allowed_origins": ["*"] }
+  ]
+}
+POLICY
+
+  if [[ ! -e /usr/local/bin/xdg-open ]]; then
+    mv /usr/bin/xdg-open /usr/bin/xdg-open.real 2>/dev/null || true
+    cat > /usr/local/bin/xdg-open <<'SHIM'
+#!/bin/sh
+# Steel VM shim: swallow external protocol launches (no-op, exit 0).
+exit 0
+SHIM
+    chmod +x /usr/local/bin/xdg-open
+  fi
+}
+install_popup_backstops
+
+# --- nodriver Python sidecar -------------------------------------------------
+ensure_python_sidecar() {
+  command -v python3 >/dev/null || { err "python3 not found (required for nodriver)"; exit 1; }
+  log "Ensuring nodriver Python sidecar venv..."
+  if [[ ! -x "${API_DIR}/python/.venv/bin/python" ]]; then
+    python3 -m venv "${API_DIR}/python/.venv"
+  fi
+  "${API_DIR}/python/.venv/bin/pip" install -q --upgrade pip
+  "${API_DIR}/python/.venv/bin/pip" install -q -r "${API_DIR}/python/requirements.txt"
+  # Optional Turnstile auto-verify (DOM-based, no OpenCV).
+  "${API_DIR}/python/.venv/bin/pip" install -q "git+https://github.com/omegastrux/nodriver-cf-verify.git" \
+    || log "  nodriver-cf-verify unavailable (optional)"
+  log "  python sidecar ready: ${API_DIR}/python/.venv/bin/python"
+}
+ensure_python_sidecar
 
 UI_DIST_PATH="${UI_DIST_PATH:-${ROOT_DIR}/ui/dist}"
 DOMAIN="${DOMAIN:-207.180.29.28:3000}"
@@ -45,6 +114,8 @@ if [[ -n "${XREACTOR_EDGE_TOKEN:-}" ]]; then
 fi
 # Browser is always headful on the Xvfb display.
 export DISPLAY="${DISPLAY:-:10}"
+export NODRIVER_SIDECAR_PORT="${NODRIVER_SIDECAR_PORT:-9224}"
+export NODRIVER_PYTHON="${API_DIR}/python/.venv/bin/python"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
@@ -66,6 +137,11 @@ check_deps() {
     exit 1
   fi
   log "  chrome: ${CHROME_EXECUTABLE_PATH} ($("${CHROME_EXECUTABLE_PATH}" --version 2>/dev/null || echo unknown))"
+  if [[ ! -x "${API_DIR}/python/.venv/bin/python" ]]; then
+    err "nodriver python venv missing — run ./setup.sh (full setup) first"
+    exit 1
+  fi
+  log "  nodriver sidecar python: ${API_DIR}/python/.venv/bin/python"
 }
 
 install_deps() {
@@ -98,12 +174,12 @@ build() {
 }
 
 ensure_dirs() {
-  # Clear stale Chrome processes and profile lock from previous crashes
-  pkill -f '/tmp/steel-chrome' 2>/dev/null || true
-  pkill -f 'google-chrome.*steel-chrome' 2>/dev/null || true
+  # Clear stale chrome processes and profile locks from previous crashes.
+  pkill -f 'remote-debugging-port' 2>/dev/null || true
   sleep 1
-  rm -rf /tmp/steel-chrome 2>/dev/null || true
-  mkdir -p /data/extensions /data/profiles /files /tmp/.steel
+  rm -f /tmp/steel-chrome/Singleton* 2>/dev/null || true
+  rm -rf /tmp/xreactor-profile-* /tmp/xreactor-uploaded-* 2>/dev/null || true
+  mkdir -p /data/extensions /data/profiles /data/steel-profiles /files /tmp/.steel
   mkdir -p "${ROOT_DIR}"
 }
 
@@ -169,6 +245,8 @@ start_server() {
     HOST="${HOST}" \
     PORT="${PORT}" \
     CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH}" \
+    NODRIVER_SIDECAR_PORT="${NODRIVER_SIDECAR_PORT}" \
+    NODRIVER_PYTHON="${NODRIVER_PYTHON}" \
     DISPLAY="${DISPLAY}" \
     UI_DIST_PATH="${UI_DIST_PATH}" \
     DOMAIN="${DOMAIN}" \

@@ -36,7 +36,7 @@ async function withScraperSession<T>(
   sessionService: SessionService,
   browserService: CDPService,
   log: (msg: string) => void,
-  opts: { proxyUrl?: string | null; sessionExtensions?: string[] },
+  opts: { proxyUrl?: string | null; sessionExtensions?: string[]; profileId?: string },
   fn: (page: Page) => Promise<T>,
 ): Promise<T> {
   return scrapePool.run(async () => {
@@ -55,6 +55,7 @@ async function withScraperSession<T>(
       const session = await sessionService.startSession({
         proxyUrl: proxy?.url ?? undefined,
         sessionExtensions: opts.sessionExtensions,
+        profileId: opts.profileId,
       });
 
       const page = await browserService.getPrimaryPage();
@@ -120,14 +121,15 @@ export const handleScrape = async (
 ) => {
   const startTime = Date.now();
   let times: Record<string, number> = {};
-  const { url, format, screenshot, pdf, proxyUrl, logUrl, removeBase64Images } = request.body;
+  const { url, format, screenshot, pdf, proxyUrl, logUrl, removeBase64Images, profileId } =
+    request.body;
 
   try {
     const response = await withScraperSession(
       sessionService,
       browserService,
       (msg) => request.log.info(msg),
-      { proxyUrl },
+      { proxyUrl, profileId },
       async (page) => {
         await startRecording(sessionService, request as any);
 

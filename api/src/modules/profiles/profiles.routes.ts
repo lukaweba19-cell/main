@@ -129,6 +129,77 @@ async function routes(server: FastifyInstance) {
       reply,
     ) => controller.handleUpdate(server, request, reply),
   );
+
+  server.delete(
+    "/profiles/:id",
+    {
+      schema: {
+        operationId: "delete_profile",
+        summary: "Delete a profile",
+        description: "Delete a profile and its stored userDataDir archive",
+        tags: ["Profiles"],
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", format: "uuid" },
+          },
+          required: ["id"],
+        },
+        querystring: {
+          type: "object",
+          properties: {
+            projectId: { type: "string", format: "uuid" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: { success: { type: "boolean" } },
+          },
+        },
+      },
+    },
+    async (
+      request: FastifyRequest<{
+        Params: { id: string };
+        Querystring: { projectId?: string };
+      }>,
+      reply,
+    ) => {
+      const { id } = request.params;
+      const { projectId } = request.query;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        return reply.code(400).send({ success: false, message: "Invalid profile id UUID format" });
+      }
+      const profileService = ProfileService.getInstance();
+      const profile = profileService.get(id, projectId);
+      if (!profile) {
+        return reply.code(404).send({ success: false, message: "Profile not found" });
+      }
+      // Remove the stored archive, then drop the meta entry.
+      try {
+        const fs = await import("fs");
+        const path = await import("path");
+        const base = (profileService as unknown as { basePath: string }).basePath;
+        if (profile.userDataDir) {
+          fs.rmSync(profile.userDataDir, { force: true });
+        }
+        if (base) {
+          fs.rmSync(path.join(base, id), { recursive: true, force: true });
+        }
+        const meta = profileService as unknown as {
+          readMeta(): Record<string, unknown>;
+          writeMeta(m: Record<string, unknown>): void;
+        };
+        const all = meta.readMeta();
+        delete all[id];
+        meta.writeMeta(all);
+      } catch {
+        // best-effort cleanup
+      }
+      return reply.code(200).send({ success: true });
+    },
+  );
 }
 
 export default routes;

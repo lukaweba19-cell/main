@@ -4,51 +4,57 @@ Patched-down Steel Browser monorepo (`api` + `ui` + `repl`) running headful on
 Xvfb with automatic extension loading and automatic video recording of every
 scrape/session.
 
-## Browser engine: CloakBrowser only (no stock Chrome)
+## Browser engine: nodriver + stock Chrome
 
-This deployment launches exclusively the
-[CloakBrowser](https://github.com/CloakHQ/cloakbrowser) stealth Chromium — a
-Chromium build with fingerprint patches compiled into the binary at the C++
-source level (canvas, WebGL, audio, fonts, GPU, WebRTC, automation-signal
-removal). Stock Chrome/Chromium is not supported: there is no fallback, and
-`setup.sh` refuses to start without the CloakBrowser binary.
+CloakBrowser is GONE. Browsers are launched by [nodriver](https://github.com/ultrafunkamsterdam/nodriver)
+(the undetected-chromedriver successor) via a small Python sidecar
+(`api/python/nodriver_launcher.py`), and the Node API attaches to the resulting
+CDP endpoint with patchright's `connectOverCDP`. All Steel machinery — sessions,
+extensions, recordings, page-events, the xreactor pipeline — is unchanged; only
+the process launcher differs.
 
-Binary resolution (mirrored in `api/src/utils/resolve-browser.ts` and
-`setup.sh`):
+- `setup.sh` installs Google Chrome stable automatically if no Chrome/Chromium
+  is present (`CHROME_EXECUTABLE_PATH` overrides).
+- The Python sidecar runs from `api/python/.venv` (deps in
+  `api/python/requirements.txt`, plus the optional
+  [nodriver-cf-verify](https://github.com/omegastrux/nodriver-cf-verify)
+  Turnstile auto-clicker).
+- The engine is reported by `GET /v1/health` as `{"status":"ok","browser":"chrome",
+  "browserRunning":false}` (`browserRunning` is true while a session is live).
 
-1. `CLOAKBROWSER_BINARY_PATH` (or `CLOAKBROWSER_EXECUTABLE_PATH`) — explicit override
-2. `~/.cloakbrowser/chromium-<version>/chrome` — what `npx cloakbrowser install`
-   downloads (highest version wins; `-pro` builds preferred when licensed)
+### Persistent fingerprint (one identity, every launch)
 
-If neither exists, launches fail with `CloakBrowser binary not found. Install
-it with: npx cloakbrowser install`.
+There are no per-launch fingerprint seeds anywhere. The fingerprint IS the
+profile: a durable default profile at `/data/steel-profiles/default` holds the
+fonts, prefs, cookies, language and window metrics, and EVERY browser launch
+reuses it:
 
-The launcher passes the stealth arguments that drive the patched code paths —
-`--fingerprint=<random seed>` and `--fingerprint-platform=linux` (native Linux
-persona; the binary spoofs GPU/hardware/screen from the seed). The engine is
-reported by `GET /v1/health` as `{"status":"ok","browser":"cloakbrowser",
-"browserRunning":false}` (`browserRunning` is true while a session is live).
+- sessions & scrapes run on the default profile directly (or `persist: true`),
+- every xreactor check runs on a fresh CLONE of it (temp dir, deleted after),
+- `profileId` (from `/v1/profiles`) switches to an uploaded profile instead.
 
-### Installing CloakBrowser (on the VM)
+Because the same profile directory is reused, any preference the user saves
+("Always allow", fonts, logins) persists across launches and restarts.
 
-```bash
-npx cloakbrowser install      # downloads the stealth Chromium (~200MB) to ~/.cloakbrowser
-./setup.sh restart            # picks it up automatically; check ./setup.sh status
-```
+### The "Open xdg-open?" popup: fixed for real
 
-Optional env vars:
+The old attempts failed because they seeded `protocol_handler.excluded_schemes`
+into `Secure Preferences` — keys modern Chromium removed, and Secure Preferences
+is HMAC-tracked so Chromium silently resets foreign values. The dialog decision
+now lives in `external_protocol_handler.cc` →
+`protocol_handler.allowed_origin_protocol_pairs` + the
+`AutoLaunchProtocolsFromOrigins` enterprise policy. Three layers cover it:
 
-| Variable | Effect |
-| --- | --- |
-| `CLOAKBROWSER_BINARY_PATH` | Use exactly this binary |
-| `CLOAKBROWSER_CACHE_DIR` | Custom cache dir to scan (default `~/.cloakbrowser`) |
-
-Verify:
-
-```bash
-curl -s http://127.0.0.1:3000/v1/health
-# {"status":"ok","browser":"cloakbrowser","browserRunning":false}
-```
+1. **Enterprise policy** (`/etc/opt/chrome/policies/managed/steel-external-protocols.json`,
+   installed by `setup.sh`): auto-allows the external schemes from any origin —
+   checked BEFORE the dialog can ever be created.
+2. **Profile prefs** (`api/src/utils/default-profile.ts`): the modern
+   `allowed_origin_protocol_pairs` map is seeded into the durable default
+   profile (and re-asserted on every clone) — the same pref the "Always allow"
+   checkbox writes.
+3. **xdg-open shim** (`/usr/local/bin/xdg-open`, installed by `setup.sh`):
+   even if a launch slips through, `xdg-open` exits 0 instantly — nothing can
+   stall the page.
 
 ## Setup / operations
 
@@ -78,11 +84,16 @@ trackers, social widgets, binaries and non-http schemes are filtered out;
 crawl early. Opening the domain root in a browser redirects to `/xreactor`,
 which serves a Scalar OpenAPI reference scoped to this endpoint.
 
+Optional request fields: `profileId` (run the checks on an uploaded
+/v1/profiles profile instead of the default clone) and `cfVerify: true`
+(run nodriver-cf-verify on Cloudflare Turnstile pages).
+
 ### Isolation & scale
 
-- Every checked URL runs in its own throwaway CloakBrowser process with a
-  unique temp profile (closed and deleted afterwards) — no shared state, no
-  recordings, and nothing appears in the sessions UI.
+- Every checked URL runs in its own nodriver-launched Chrome with a fresh
+  CLONE of the durable default profile (persistent fingerprint, closed and
+  deleted afterwards) — no shared state, no cross-check pollution. Uploaded
+  profiles can be selected with `profileId`.
 - Batch requests (`url` as array or `urls: [...]`, cap 25/request) check all
   URLs **in parallel**, each in its own browser, bounded by
   `XREACTOR_MAX_CONCURRENT` (default 4) to protect VM memory.
@@ -148,6 +159,7 @@ clears) are reported with `"status": "error"` per page and the verdict stays
 `allowed` (no cloud detected on an unverified page is not a violation) —
 check the per-page status when acting on the result.
 
-Requirements: Node >= 22, Chrome or the CloakBrowser binary, Xvfb on `:10`
-(`DISPLAY=:10`) for headful launches. As root, `--no-sandbox` is added
-automatically.
+Requirements: Node >= 22, Python 3 + `api/python/.venv` (nodriver sidecar,
+installed by `./setup.sh`), Chrome/Chromium (auto-installed by `./setup.sh`),
+Xvfb on `:10` (`DISPLAY=:10`) for headful launches. As root, `--no-sandbox` is
+added automatically.

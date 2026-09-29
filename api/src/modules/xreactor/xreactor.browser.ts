@@ -1,13 +1,14 @@
-import { Page, chromium } from "patchright";
+import type { Page } from "patchright";
+import { chromium } from "patchright";
 import fs from "node:fs";
-import os from "os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { BrowserNotFoundError, resolveBrowser } from "../../utils/resolve-browser.js";
 import {
-  resolveBrowser,
-  getCloakStealthArgs,
-  BrowserNotFoundError,
-} from "../../utils/resolve-browser.js";
+  cloneDefaultProfile,
+  writeExternalProtocolPrefs,
+} from "../../utils/default-profile.js";
+import { nodriverLaunch, nodriverClose } from "../../utils/nodriver-client.js";
 import { getExtensionPaths } from "../../utils/extensions.js";
 import {
   snapshotPage,
@@ -18,17 +19,28 @@ import { acquireXvfbDisplay, type XvfbDisplay } from "./xvfb-display.js";
 
 /**
  * XReactor runs COMPLETELY outside the Steel session system: every checked
- * URL gets its own throwaway CloakBrowser process with a unique temporary
- * profile, closed and deleted afterwards.
+ * URL gets its own private nodriver-launched Chrome process, closed and its
+ * profile clone deleted afterwards.
  *
- * TRUE CONCURRENCY with per-check recordings:
+ * FINGERPRINT PERSISTENCE (the core of this migration):
+ * - Every check starts from a CLONE of the durable default profile
+ *   (/data/steel-profiles/default). The clone carries the same fonts, prefs,
+ *   cookies and metrics every time, so every check presents the SAME
+ *   fingerprint and the "never ask about external protocols" preference
+ *   seeded into the default profile always applies.
+ * - No per-launch random seeds exist anywhere any more.
+ *
+ * TRUE CONCURRENCY with per-check recordings (unchanged):
  * - Each check acquires its OWN Xvfb display (:11, :12, ...) and launches its
  *   browser there, so concurrent checks never share a screen and each video
- *   films exactly one browser (no cross-contamination, no black bars).
+ *   films exactly one browser.
  * - The shared Steel display (:10) is never touched, so /v1/scrape keeps
  *   working in parallel with xreactor traffic.
- * - The browser window is sized to FILL the display so the recording frame
- *   is exactly the browser (viewport 1440x900 + chrome window decorations).
+ * - The browser window fills the display so the recording frame is exactly
+ *   the browser.
+ *
+ * PROFILES: `profileId` selects an uploaded profile (/v1/profiles) as the
+ * clone source instead of the default profile; omitted => default profile.
  */
 
 /** Cap on simultaneously live isolated browsers (memory guard for the VM). */
@@ -45,144 +57,135 @@ export interface IsolatedBrowser {
   close: () => Promise<void>;
 }
 
-/**
- * Launches a private CloakBrowser instance for one check.
- *
- * - Unique tmp profile dir per launch (removed on close) => no cross-request
- *   state, no profile lock contention, fresh fingerprint seed each time.
- * - The nopecha extension loads exactly like in the main stack so challenge
- *   pages still get solved.
- * - When `display` is provided the browser runs on that dedicated Xvfb screen
- *   and its window is resized to fill it; otherwise it falls back to the
- *   shared DISPLAY (recording quality degrades, checks still work).
- */
-/**
- * Schemes whose "Open <handler>?" dialogs must never appear: they block the
- * single page and stall the whole check (t.me pages auto-fire tg:// on load).
- *
- * Chromium consults TWO pref stores for external protocols:
- *   - profile.default.Preferences  (protocol_handler.excluded_schemes)
- *   - profile."Secure Preferences" (protocol_handler + ExcludedSchemes)
- * Both must be seeded BEFORE first launch, and the values must be real
- * booleans — Chrome drops numeric-coerced entries silently.
- * Setting protocol_handler.allow_excluded_schemes=false + excluded entries
- * makes every prompt auto-decline with no dialog and no dwell.
- */
-const SUPPRESSED_PROTOCOL_SCHEMES = [
-  "tg",
-  "whatsapp",
-  "viber",
-  "skype",
-  "slack",
-  "zoommtg",
-  "ms-windows-store",
-  "discord",
-  "mailto",
-  "webcal",
-  "steam",
-  "spotify",
-];
+export interface LaunchIsolatedOptions {
+  /** Uploaded profile id (ProfileService) to clone instead of the default. */
+  profileId?: string;
+  /** Run nodriver-cf-verify on the seed tab after launch (challenge pages). */
+  cfVerify?: boolean;
+}
 
-function seedProfilePreferences(profileDir: string): void {
+/** Uploaded profile meta shape (subset of ProfileService entries). */
+interface StoredProfile {
+  id: string;
+  userDataDir?: string | null; // path to the uploaded userDataDir.zip
+}
+
+/** Materialize an uploaded profile zip into a runnable profile dir. */
+async function materializeUploadedProfile(
+  profileId: string,
+  log: (msg: string) => void,
+): Promise<string | null> {
+  // ProfileService lives on the fastify server; resolve lazily to avoid a
+  // circular import with the routes layer.
   try {
-    // Before first launch the profile has no dirs; Chromium requires the
-    // Default dir for the preference files to be honored.
-    fs.mkdirSync(path.join(profileDir, "Default"), { recursive: true });
-    const excluded: Record<string, boolean> = {};
-    for (const scheme of SUPPRESSED_PROTOCOL_SCHEMES) excluded[scheme] = true;
-
-    const basePrefs = {
-      protocol_handler: {
-        allow_excluded_schemes: false,
-        excluded_schemes: excluded,
-      },
-      credentials_enable_service: false,
-      credentials_enable_autosignin: false,
-      sync_promo: { show_on_first_run_allowed: false },
-      distribution: { import_bookmarks: false, make_chrome_default: false },
-      privacy_sandbox: { initiated: false },
-    };
-
-    fs.writeFileSync(
-      path.join(profileDir, "Default", "Preferences"),
-      JSON.stringify(basePrefs),
-    );
-    // "Secure Preferences" is tracked with HMACs for some keys, but unknown
-    // / fresh-profile keys load without enforcement — the exclusion map is
-    // read from it when present.
-    fs.writeFileSync(
-      path.join(profileDir, "Default", "Secure Preferences"),
-      JSON.stringify({
-        protocol_handler: {
-          allow_excluded_schemes: false,
-          excluded_schemes: excluded,
-        },
-      }),
-    );
-  } catch {
-    // Preferences seeding is best-effort; the dialog suppression simply
-    // degrades to the old behavior if the file can't be written.
+    const { ProfileService } = await import("../../services/profile.service.js");
+    const meta: StoredProfile | null = ProfileService.getInstance().get(profileId) as any;
+    if (!meta?.userDataDir || !fs.existsSync(meta.userDataDir)) {
+      log(`[xreactor] profile ${profileId} not found or has no userDataDir; using default profile`);
+      return null;
+    }
+    const dest = path.join("/tmp", `xreactor-uploaded-${randomUUID()}`);
+    fs.mkdirSync(dest, { recursive: true });
+    const { default: extract } = await import("extract-zip");
+    await extract(meta.userDataDir, { dir: dest });
+    // Uploaded archives usually contain the profile CONTENTS; if they packed a
+    // single root folder, unwrap it.
+    const entries = fs.readdirSync(dest);
+    if (entries.length === 1 && fs.statSync(path.join(dest, entries[0])).isDirectory()) {
+      return path.join(dest, entries[0]);
+    }
+    return dest;
+  } catch (err) {
+    log(`[xreactor] materializing profile ${profileId} failed (${err}); using default profile`);
+    return null;
   }
 }
 
+/**
+ * Launches a private nodriver Chrome for one check.
+ *
+ * - Profile = clone of the durable default profile (or of the uploaded
+ *   profile selected by profileId) => persistent fingerprint + persistent
+ *   "no external protocol popups" prefs on every single check.
+ * - The nopecha extension loads exactly like the main stack.
+ * - When `display` is provided the browser runs on that dedicated Xvfb
+ *   screen; otherwise it falls back to the shared DISPLAY.
+ */
 export async function launchIsolatedBrowser(
   log: (msg: string) => void,
   display?: XvfbDisplay | null,
+  opts: LaunchIsolatedOptions = {},
 ): Promise<IsolatedBrowser> {
   const resolved = resolveBrowser(); // throws BrowserNotFoundError when missing
-  const profileDir = path.join(os.tmpdir(), `xreactor-profile-${randomUUID()}`);
-  await fs.promises.mkdir(profileDir, { recursive: true });
-  seedProfilePreferences(profileDir);
+
+  // 1) Profile: uploaded profile if requested+available, else the default clone.
+  let profileDir: string | null = null;
+  if (opts.profileId) {
+    profileDir = await materializeUploadedProfile(opts.profileId, log);
+  }
+  if (!profileDir) {
+    profileDir = cloneDefaultProfile(log);
+  }
+  // Re-assert the protocol prefs on the working copy (idempotent merge) so a
+  // corrupt/older profile can never resurrect the xdg-open dialog.
+  writeExternalProtocolPrefs(profileDir, {});
 
   const extensionPaths = await getExtensionPaths();
   const width = display?.width ?? 1440;
   const height = (display?.height ?? 900) - 50; // room for window decorations
 
-  const args = [
-    ...getCloakStealthArgs(), // --no-sandbox, --fingerprint=<seed>, --fingerprint-platform=linux
-    "--test-type", // suppress the --no-sandbox infobar (required as root)
-    "--disable-dev-shm-usage", // /tmp shm is tiny; keeps many browsers stable
-    "--disable-session-crashed-bubble",
-    "--hide-crash-restore-bubble",
-    `--window-size=${width},${height}`,
-    "--window-position=0,0",
-    "--start-maximized",
-    ...(extensionPaths.length
-      ? [
-          `--load-extension=${extensionPaths.join(",")}`,
-          `--disable-extensions-except=${extensionPaths.join(",")}`,
-        ]
-      : []),
-  ];
-
   log(
-    `[xreactor] launching isolated browser (engine=${resolved.engine}, profile=${profileDir}, display=${display?.display ?? (process.env.DISPLAY || ":10")})`,
+    `[xreactor] launching isolated nodriver browser (profile=${profileDir}, display=${display?.display ?? (process.env.DISPLAY || ":10")})`,
   );
-  const context = await chromium.launchPersistentContext(profileDir, {
-    headless: false, // headful on the Xvfb display, same as the main stack
-    executablePath: resolved.executablePath,
-    viewport: { width: 1440, height: 900 },
-    args,
-    ignoreDefaultArgs: ["--enable-automation"],
-    timeout: 60_000,
-    handleSIGINT: false,
-    handleSIGTERM: false,
-    handleSIGHUP: false,
-    env: { ...process.env, DISPLAY: display?.display || (process.env.DISPLAY || ":10") },
-  });
+
+  let launch: Awaited<ReturnType<typeof nodriverLaunch>>;
+  try {
+    launch = await nodriverLaunch({
+      profile: profileDir,
+      port: 0, // sidecar picks a free port (concurrency-safe)
+      display: display?.display || process.env.DISPLAY || ":10",
+      window: [width, height],
+      executable: resolved.executablePath,
+      extensions: extensionPaths,
+      cfVerify: opts.cfVerify === true,
+    }, 90_000);
+  } catch (err) {
+    fs.rm(profileDir, { recursive: true, force: true }, () => {});
+    throw err;
+  }
+
+  if (!launch.ok || !launch.webSocketDebuggerUrl) {
+    fs.rm(profileDir, { recursive: true, force: true }, () => {});
+    throw new Error(launch.error || "nodriver launch failed without a CDP endpoint");
+  }
+  const pid = launch.pid ?? null;
+  log(`[xreactor] nodriver launched chrome pid=${pid} port=${launch.port}`);
+
+  // Attach Node to the nodriver-owned browser over CDP.
+  const browser = await chromium.connectOverCDP(launch.webSocketDebuggerUrl);
+  const context = browser.contexts()[0];
+  if (!context) {
+    await browser.close().catch(() => {});
+    if (pid != null) await nodriverClose(pid);
+    fs.rm(profileDir, { recursive: true, force: true }, () => {});
+    throw new Error("nodriver browser exposed no default context over CDP");
+  }
 
   const pages = context.pages();
   const page = pages.length ? pages[0] : await context.newPage();
 
   const close = async (): Promise<void> => {
     try {
-      await context.close();
+      await browser.close();
     } catch {
       // already dead
     }
-    // Best-effort profile cleanup; old profiles are also swept by the
+    if (pid != null) {
+      await nodriverClose(pid).catch(() => {});
+    }
+    // Best-effort profile cleanup; leftovers are also swept by the
     // maintenance loop in case the process crashed before cleanup.
-    fs.rm(profileDir, { recursive: true, force: true }, () => {});
+    fs.rm(profileDir!, { recursive: true, force: true }, () => {});
   };
 
   return { page, display: display ?? null, close };
@@ -277,11 +280,12 @@ export async function waitForCheckReady(
  * maxAgeMs <= 0 removes every leftover regardless of age (daily flush).
  */
 export function sweepStaleProfiles(maxAgeMs = 60 * 60 * 1000): number {
-  const tmp = os.tmpdir();
+  const tmp = "/tmp";
   let removed = 0;
+  const prefixes = ["xreactor-profile-", "xreactor-uploaded-"];
   try {
     for (const name of fs.readdirSync(tmp)) {
-      if (!name.startsWith("xreactor-profile-")) continue;
+      if (!prefixes.some((p) => name.startsWith(p))) continue;
       const dir = path.join(tmp, name);
       try {
         const age = Date.now() - fs.statSync(dir).mtimeMs;

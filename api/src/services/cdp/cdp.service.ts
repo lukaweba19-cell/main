@@ -27,11 +27,17 @@ import {
   compileUrlPatterns,
   isImageRequest,
 } from "../../utils/requests.js";
+import { BrowserNotFoundError, resolveBrowser } from "../../utils/resolve-browser.js";
 import {
-  BrowserNotFoundError,
-  getCloakStealthArgs,
-  resolveBrowser,
-} from "../../utils/resolve-browser.js";
+  nodriverLaunch,
+  nodriverClose,
+  type NodriverLaunchResult,
+} from "../../utils/nodriver-client.js";
+import {
+  ensureDefaultProfile,
+  writeExternalProtocolPrefs,
+} from "../../utils/default-profile.js";
+import { anonymizeProxy, closeAnonymizedProxy } from "proxy-chain";
 import {
   deepMerge,
   extractStorageForPageWithTimeout,
@@ -88,9 +94,15 @@ export class CDPService extends EventEmitter {
   private logger: FastifyBaseLogger;
   private browserInstance: PlaywrightBrowser | null;
   private wsEndpoint: string | null;
+  /** OS pid of the chrome process the nodriver sidecar started (null = unknown). */
+  private nodriverPid: number | null = null;
+  /** Local forwarder URL when an authenticated proxy is in use. */
+  private localProxyUrl: string | null = null;
+  /** Chrome's real default context (created by nodriver, attached over CDP). */
+  private defaultContext: PlaywrightContext | null = null;
   private sessionContext: SessionData | null;
   private chromeExecPath: string;
-  private browserEngine: "cloakbrowser" | "chrome";
+  private browserEngine: "chrome";
   private wsProxyServer: httpProxy;
   private primaryPage: PlaywrightPage | null;
   private launchConfig?: BrowserLauncherOptions;
@@ -126,15 +138,15 @@ export class CDPService extends EventEmitter {
     this.browserInstance = null;
     this.wsEndpoint = null;
     this.sessionContext = null;
-    // CloakBrowser-only: resolve the stealth binary up front. A missing
-    // binary is a configuration error, not a fallback situation.
+    // nodriver stack: resolve the Chrome/Chromium binary the Python sidecar
+    // will launch. A missing binary is a configuration error, not a fallback.
     try {
       const resolved = resolveBrowser();
       this.chromeExecPath = resolved.executablePath;
-      this.browserEngine = "cloakbrowser";
+      this.browserEngine = "chrome";
       this.logger.info(
-        `[CDPService] CloakBrowser stealth Chromium: ${resolved.executablePath}` +
-          (resolved.version ? ` (v${resolved.version})` : ""),
+        `[CDPService] Chrome for nodriver: ${resolved.executablePath}` +
+          (resolved.version ? ` (${resolved.version})` : ""),
       );
     } catch (err) {
       if (err instanceof BrowserNotFoundError) {
@@ -143,7 +155,7 @@ export class CDPService extends EventEmitter {
       // Defer the throw to launch time so the service still boots and can
       // serve /health; every launch attempt will surface the same error.
       this.chromeExecPath = "";
-      this.browserEngine = "cloakbrowser";
+      this.browserEngine = "chrome";
     }
     this.defaultTimezone = env.DEFAULT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
     this.trackedOrigins = new Set<string>();
@@ -166,7 +178,9 @@ export class CDPService extends EventEmitter {
       options: {},
       blockAds: true,
       extensions: [],
-      userDataDir: env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome"),
+      // Durable default profile => the fingerprint identity (fonts, prefs,
+      // cookies, metrics) persists across restarts instead of regenerating.
+      userDataDir: env.CHROME_USER_DATA_DIR || ensureDefaultProfile(),
       timezone: coldStartTimezone,
       userPreferences: {
         plugins: {
@@ -207,8 +221,8 @@ export class CDPService extends EventEmitter {
     this.chromeExecPath = execPath;
   }
 
-  /** Which engine the launcher is configured to use. Always cloakbrowser. */
-  public getBrowserEngine(): "cloakbrowser" | "chrome" {
+  /** Which engine the launcher is configured to use. Always chrome (nodriver). */
+  public getBrowserEngine(): "chrome" {
     return this.browserEngine;
   }
 
@@ -271,7 +285,9 @@ export class CDPService extends EventEmitter {
       throw new Error("CDPService has not been launched yet!");
     }
     if (this.primaryPage.isClosed()) {
-      this.primaryPage = await this.browserInstance.newPage();
+      this.primaryPage = this.defaultContext
+        ? await this.defaultContext.newPage()
+        : await this.browserInstance.newPage();
     }
     return this.primaryPage;
   }
@@ -561,36 +577,25 @@ export class CDPService extends EventEmitter {
           "--disable-hang-monitor",
         ];
 
+        // Window size, debug port and display are owned by the nodriver
+        // sidecar launch; Node only chooses maximize/kiosk behavior.
         const dynamicArgs = [
-          this.launchConfig.dimensions ? "" : "--start-maximized",
-          `--remote-debugging-address=127.0.0.1`,
-          `--remote-debugging-port=${env.CDP_REDIRECT_PORT}`,
-          `--window-size=${this.launchConfig.dimensions?.width ?? 1920},${
-            this.launchConfig.dimensions?.height ?? 1080
-          }`,
+          this.launchConfig.dimensions || this.launchConfig.fullscreen ? "" : "--start-maximized",
           this.launchConfig.fullscreen === true ? "--kiosk" : "",
         ];
 
         if (!this.chromeExecPath) {
           throw new BrowserNotFoundError(
-            "CloakBrowser binary not found. Install it with: npx cloakbrowser install",
+            "Chrome/Chromium binary not found. Install it with: `npx @puppeteer/browsers install chrome@stable`, `apt-get install -y chromium`, or set CHROME_EXECUTABLE_PATH.",
           );
         }
 
         const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
 
-        // CloakBrowser's C++ patches are driven by its own flags. When the
-        // stealth binary is in use, pass the same args the official wrapper
-        // would (--fingerprint=<seed>, --fingerprint-platform=windows) so the
-        // patched code paths activate. Its binary tolerates our full arg set.
-        const engineArgs =
-          this.browserEngine === "cloakbrowser" ? getCloakStealthArgs() : [];
-
         const launchArgs = uniq([
           ...staticDefaultArgs,
           ...headfulArgs,
           ...dynamicArgs,
-          ...engineArgs,
           // Every extension resolved from the extensions directory loads by
           // default. (Regression: the Patchright migration dropped these args,
           // so uploaded extensions silently stopped loading.)
@@ -605,7 +610,7 @@ export class CDPService extends EventEmitter {
         ]).filter((arg) => !env.FILTER_CHROME_ARGS.includes(arg));
 
         const userDataDirToUse =
-          userDataDir || env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome");
+          userDataDir || env.CHROME_USER_DATA_DIR || ensureDefaultProfile();
         await fs.promises.mkdir(userDataDirToUse, { recursive: true });
 
         if (this.launchConfig.userPreferences) {
@@ -616,43 +621,51 @@ export class CDPService extends EventEmitter {
               this.setupUserPreferences(userDataDirToUse, this.launchConfig!.userPreferences!),
             "Failed to set up user preferences",
           );
+        } else {
+          // Seed the modern external-protocol prefs (the "Open xdg-open?" popup
+          // fix) into any non-durable profile; the merge is idempotent.
+          writeExternalProtocolPrefs(userDataDirToUse, {});
         }
 
-        // Persistent context = real Chrome profile directory. This is what makes
-        // --load-extension work and behaves exactly like a user-launched browser.
-        const launchOptions: Record<string, unknown> = {
-          headless: false as const,
-          executablePath: this.chromeExecPath || undefined,
-          viewport: this.launchConfig.dimensions
-            ? {
-                width: this.launchConfig.dimensions.width,
-                height: this.launchConfig.dimensions.height,
-              }
-            : null,
-          args: launchArgs,
-          ignoreDefaultArgs: ["--enable-automation"],
-          timeout: 0,
-          handleSIGINT: false,
-          handleSIGTERM: false,
-          handleSIGHUP: false,
-          env: {
-            ...process.env,
-            HOME: os.userInfo().homedir,
-            TZ: timezone,
-            DISPLAY: env.DISPLAY,
-          },
-          proxy: options.proxyUrl ? { server: options.proxyUrl } : undefined,
-          dumpio: env.DEBUG_CHROME_PROCESS,
+        // Proxy: Chromium takes it as a flag, and --proxy-server cannot carry
+        // credentials — authenticated URLs go through a local forwarder.
+        let proxyArg: string | undefined;
+        if (options.proxyUrl) {
+          try {
+            this.localProxyUrl = await anonymizeProxy(options.proxyUrl);
+            proxyArg = `--proxy-server=${this.localProxyUrl}`;
+          } catch (error) {
+            this.logger.warn(
+              `[CDPService] anonymizeProxy failed, passing proxy URL directly: ${error}`,
+            );
+            proxyArg = `--proxy-server=${options.proxyUrl}`;
+          }
+        }
+
+        this.logger.info(
+          `[CDPService] Launching via nodriver sidecar (profile=${userDataDirToUse}, port=${env.CDP_REDIRECT_PORT})`,
+        );
+
+        const launchRequest = {
+          profile: userDataDirToUse,
+          port: parseInt(env.CDP_REDIRECT_PORT, 10) || 9222,
+          display: env.DISPLAY,
+          window: [
+            this.launchConfig.dimensions?.width ?? 1920,
+            this.launchConfig.dimensions?.height ?? 1080,
+          ] as [number, number],
+          executable: this.chromeExecPath || undefined,
+          extensions: extensionPaths,
+          browserArgs: [...launchArgs, ...(proxyArg ? [proxyArg] : [])],
+          lang: "en-US",
+          env: { TZ: timezone },
         };
 
-        this.logger.info(`[CDPService] Launch Options:`);
-        this.logger.info(JSON.stringify({ ...launchOptions, env: undefined }, null, 2));
-
-        this.browserInstance = await executeCritical(
+        const launched = await executeCritical(
           async () =>
             (await tracer.startActiveSpan("CDPService.launchBrowser", async () => {
-              return await chromium.launchPersistentContext(userDataDirToUse, launchOptions as any);
-            })) as unknown as PlaywrightBrowser,
+              return await nodriverLaunch(launchRequest);
+            })) as NodriverLaunchResult,
           (error) =>
             new BrowserProcessError(
               error instanceof Error ? error.message : String(error),
@@ -661,10 +674,32 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        // Persistent contexts expose their browser handle for target-level events.
-        const contextAny = this.browserInstance as unknown as any;
-        const browserHandle: PlaywrightBrowser =
-          contextAny.browser?.() ?? (this.browserInstance as unknown as PlaywrightBrowser);
+        if (!launched.ok || !launched.webSocketDebuggerUrl) {
+          throw new BrowserProcessError(
+            launched.error || "nodriver sidecar did not return a CDP endpoint",
+            BrowserProcessState.LAUNCH_FAILED,
+          );
+        }
+        this.nodriverPid = launched.pid ?? null;
+
+        // Attach Node to the nodriver-owned browser over CDP. From here on the
+        // entire Steel pipeline (targets, instrumentation, proxying) works
+        // exactly as before — only the process launcher changed.
+        this.browserInstance = await executeCritical(
+          async () =>
+            (await chromium.connectOverCDP(
+              launched.webSocketDebuggerUrl!,
+            )) as unknown as PlaywrightBrowser,
+          (error) =>
+            new BrowserProcessError(
+              error instanceof Error ? error.message : String(error),
+              BrowserProcessState.LAUNCH_FAILED,
+              error,
+            ),
+        );
+        this.defaultContext = this.browserInstance.contexts()[0] ?? null;
+
+        const browserHandle: PlaywrightBrowser = this.browserInstance;
 
         await executeOptional(
           this.logger,
@@ -682,7 +717,10 @@ export class CDPService extends EventEmitter {
         (browserHandle as any).on?.("disconnected", this.onDisconnect.bind(this));
 
         const pages = await executeCritical(
-          async () => (await (this.browserInstance as any).pages()) as PlaywrightPage[],
+          async () =>
+            (this.defaultContext
+              ? this.defaultContext.pages()
+              : ((await (this.browserInstance as any).pages?.()) ?? [])) as PlaywrightPage[],
           (error) =>
             new BrowserProcessError(
               "Failed to get pages from browser instance",
@@ -748,7 +786,9 @@ export class CDPService extends EventEmitter {
             ),
         );
 
-        (this.browserInstance as any).on("page", (page: PlaywrightPage) => {
+        (this.defaultContext ?? (this.browserInstance as any)).on(
+          "page",
+          (page: PlaywrightPage) => {
           void this.attachPageInstrumentation(page).catch((error) => {
             if (isTargetClosedError(error)) {
               this.logger.debug(
@@ -759,7 +799,8 @@ export class CDPService extends EventEmitter {
             }
             this.logger.error({ err: error }, "[CDPService] Unhandled error in page setup");
           });
-        });
+        },
+        );
 
         if (!this.shuttingDown && this.browserInstance) {
           await this.pluginManager.onBrowserReady(this.launchConfig);
@@ -925,7 +966,9 @@ export class CDPService extends EventEmitter {
     if (!this.browserInstance) {
       throw new Error("Browser instance not initialized");
     }
-    return this.browserInstance.newPage();
+    return this.defaultContext
+      ? this.defaultContext.newPage()
+      : this.browserInstance.newPage();
   }
 
   private async shutdownHook() {
@@ -955,6 +998,16 @@ export class CDPService extends EventEmitter {
         this.browserInstance?.close().catch(() => {}) ?? Promise.resolve(),
         new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
       ]);
+      // The chrome process belongs to the nodriver sidecar — ask it to reap it.
+      if (this.nodriverPid != null) {
+        await nodriverClose(this.nodriverPid).catch(() => {});
+        this.nodriverPid = null;
+      }
+      if (this.localProxyUrl) {
+        await closeAnonymizedProxy(this.localProxyUrl, true).catch(() => {});
+        this.localProxyUrl = null;
+      }
+      this.defaultContext = null;
       await this.shutdownHook();
 
       this.logger.info("[CDPService] Cleaning up files during shutdown");
@@ -974,6 +1027,15 @@ export class CDPService extends EventEmitter {
     } catch (error) {
       this.logger.error(`[CDPService] Error during shutdown: ${error}`);
       await this.browserInstance?.close().catch(() => {});
+      if (this.nodriverPid != null) {
+        await nodriverClose(this.nodriverPid).catch(() => {});
+        this.nodriverPid = null;
+      }
+      if (this.localProxyUrl) {
+        await closeAnonymizedProxy(this.localProxyUrl, true).catch(() => {});
+        this.localProxyUrl = null;
+      }
+      this.defaultContext = null;
       await this.shutdownHook();
 
       try {
@@ -1194,7 +1256,9 @@ export class CDPService extends EventEmitter {
     };
 
     try {
-      const pages = (await (this.browserInstance as any).pages()) as PlaywrightPage[];
+      const pages = (this.defaultContext
+        ? this.defaultContext.pages()
+        : ((await (this.browserInstance as any).pages?.()) ?? [])) as PlaywrightPage[];
 
       let crashedCount = 0;
       const validPages = pages.filter((page) => {
@@ -1252,7 +1316,8 @@ export class CDPService extends EventEmitter {
   public async getAllPages(): Promise<PlaywrightPage[]> {
     if (!this.browserInstance) return [];
     try {
-      return (await (this.browserInstance as any).pages()) as PlaywrightPage[];
+      if (this.defaultContext) return this.defaultContext.pages() as PlaywrightPage[];
+      return ((await (this.browserInstance as any).pages?.()) ?? []) as PlaywrightPage[];
     } catch {
       return [];
     }
@@ -1334,11 +1399,13 @@ export class CDPService extends EventEmitter {
 
     if (this.shuttingDown) {
       this.browserInstance = null;
+      this.defaultContext = null;
       this.primaryPage = null as any;
       return;
     }
 
     this.browserInstance = null;
+    this.defaultContext = null;
     this.primaryPage = null as any;
     try {
       await this.disconnectHandler();

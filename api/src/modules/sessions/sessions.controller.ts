@@ -15,6 +15,7 @@ export const handleLaunchBrowserSession = async (
       sessionId,
       proxyUrl,
       userDataDir,
+      profileId,
       persist,
       sessionContext,
       sessionExtensions,
@@ -37,6 +38,7 @@ export const handleLaunchBrowserSession = async (
       sessionId,
       proxyUrl,
       userDataDir,
+      profileId,
       persist,
       sessionContext: sessionContext as {
         cookies?: CookieData[] | undefined;

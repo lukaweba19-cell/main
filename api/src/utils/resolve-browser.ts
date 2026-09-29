@@ -1,33 +1,30 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { execFileSync } from "node:child_process";
 
 /**
- * CloakBrowser-only browser resolution.
+ * Browser resolution for the nodriver stack.
  *
- * This deployment launches exclusively the CloakBrowser stealth Chromium
- * (github.com/CloakHQ/cloakbrowser) — a Chromium build with fingerprint
- * patches compiled in at the C++ source level. Stock Chrome/Chromium is not
- * supported and never resolved; if no CloakBrowser binary exists the launch
- * fails with instructions instead of silently falling back.
+ * CloakBrowser is GONE. The engine is now: nodriver (Python) launching stock
+ * Chrome/Chromium with its own stealth defaults; this module only finds the
+ * binary to hand to it. No fingerprint flags exist any more — fingerprint
+ * persistence comes from reusing ONE user-data-dir (see default-profile.ts),
+ * which is the honest way to keep an identity stable across launches.
  *
  * Priority:
- *   1. CLOAKBROWSER_BINARY_PATH / CLOAKBROWSER_EXECUTABLE_PATH (explicit override)
- *   2. ~/.cloakbrowser/chromium-<version>/chrome (what `npx cloakbrowser install`
- *      downloads; highest version wins, -pro builds preferred when licensed)
+ *   1. CHROME_EXECUTABLE_PATH (explicit)
+ *   2. google-chrome / google-chrome-stable / chromium / chromium-browser on PATH
+ *   3. Common install locations (/usr/bin, /opt/google/chrome)
  */
-
-const CLOAK_STEALTH_ARGS = ["--no-sandbox", "--fingerprint-platform=linux"] as const;
 
 export interface ResolvedBrowser {
   /** Absolute path to the browser executable to launch. */
   executablePath: string;
   /** Which engine the path came from. */
-  engine: "cloakbrowser" | "chrome";
-  /** Version string when detectable (CloakBrowser dir name, `google-chrome --version`). */
+  engine: "chrome";
+  /** `--version` output when detectable. */
   version?: string;
-  /** True when engine === "cloakbrowser": launch must add the cloak stealth args. */
-  stealthArgs: string[];
 }
 
 export class BrowserNotFoundError extends Error {
@@ -37,130 +34,108 @@ export class BrowserNotFoundError extends Error {
   }
 }
 
-/** A random 5-digit fingerprint seed, matching the official wrapper's behaviour. */
-function fingerprintSeed(): string {
-  return String(Math.floor(Math.random() * 90000) + 10000);
-}
+const CANDIDATE_NAMES = [
+  "google-chrome",
+  "google-chrome-stable",
+  "google-chrome-beta",
+  "chromium",
+  "chromium-browser",
+];
 
-function readVersionFromMarker(cacheDir: string): string | null {
-  // The wrapper writes latest_version_<platform> markers on install/update.
-  const markerNames = ["latest_version_linux-x64", "latest_version"];
-  for (const name of markerNames) {
-    try {
-      const marker = path.join(cacheDir, name);
-      if (fs.existsSync(marker)) {
-        const version = fs.readFileSync(marker, "utf-8").trim();
-        if (version) return version;
-      }
-    } catch {
-      // unreadable marker — fall through to directory scan
-    }
-  }
-  return null;
-}
+const CANDIDATE_PATHS = [
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/opt/google/chrome/chrome",
+  "/opt/google/chrome/google-chrome",
+  // Puppeteer-style downloads kept out of the way of apt
+  "/root/.cache/puppeteer/chrome/*/chrome-linux64/chrome",
+];
 
-function hasProLicense(cacheDir: string): boolean {
-  return (
-    fs.existsSync(path.join(cacheDir, "license.key")) ||
-    !!process.env.CLOAKBROWSER_LICENSE_KEY
-  );
-}
-
-function findCloakBinaryInCache(cacheDir: string): ResolvedBrowser | null {
-  if (!fs.existsSync(cacheDir)) return null;
-
-  const markerVersion = readVersionFromMarker(cacheDir);
-  const pro = hasProLicense(cacheDir);
-
-  // Candidate versions: marker first, then every chromium-* dir on disk
-  // (highest version wins — avoids breaking when markers are stale).
-  const candidates: string[] = [];
-  if (markerVersion) candidates.push(markerVersion);
+function versionOf(binaryPath: string): string | undefined {
   try {
-    const entries = fs
-      .readdirSync(cacheDir)
-      .filter((name) => name.startsWith("chromium-"))
-      .sort((a, b) => b.localeCompare(a));
-    for (const entry of entries) {
-      const version = entry.replace(/^chromium-/, "").replace(/-pro$/, "");
-      if (!candidates.includes(version)) candidates.push(version);
-    }
+    return execFileSync(binaryPath, ["--version"], { timeout: 5_000 })
+      .toString()
+      .trim();
   } catch {
-    return null;
+    return undefined;
   }
-
-  for (const version of candidates) {
-    // Prefer pro binary when licensed, else free; fall back to whichever exists.
-    const order = pro
-      ? [
-          path.join(cacheDir, `chromium-${version}-pro`, "chrome"),
-          path.join(cacheDir, `chromium-${version}`, "chrome"),
-        ]
-      : [
-          path.join(cacheDir, `chromium-${version}`, "chrome"),
-          path.join(cacheDir, `chromium-${version}-pro`, "chrome"),
-        ];
-    for (const binaryPath of order) {
-      try {
-        if (fs.existsSync(binaryPath)) {
-          fs.accessSync(binaryPath, fs.constants.X_OK);
-          return {
-            executablePath: binaryPath,
-            engine: "cloakbrowser",
-            version,
-            // --no-sandbox is already handled by the launcher for root; the
-            // seed arg is added at launch time (see getCloakStealthArgs).
-            stealthArgs: [],
-          };
-        }
-      } catch {
-        // not executable — try next candidate
-      }
-    }
-  }
-  return null;
 }
 
 /**
- * The stealth args the launcher passes to the CloakBrowser binary on Linux:
- * --no-sandbox, --fingerprint=<random 5-digit seed>, --fingerprint-platform=linux.
- * The fingerprint seed is generated per launch.
- */
-export function getCloakStealthArgs(): string[] {
-  return [`--fingerprint=${fingerprintSeed()}`, ...CLOAK_STEALTH_ARGS];
-}
-
-/**
- * Resolve the CloakBrowser binary to launch. Throws BrowserNotFoundError when
- * none is installed — there is deliberately no Chrome/Chromium fallback.
+ * Resolve the Chrome/Chromium binary that nodriver will launch. Throws
+ * BrowserNotFoundError when none is installed.
  */
 export function resolveBrowser(): ResolvedBrowser {
   // 1. Explicit override always wins.
-  const override =
-    process.env.CLOAKBROWSER_BINARY_PATH || process.env.CLOAKBROWSER_EXECUTABLE_PATH;
+  const override = process.env.CHROME_EXECUTABLE_PATH;
   if (override) {
     const executablePath = path.normalize(override);
     if (fs.existsSync(executablePath)) {
-      return {
-        executablePath,
-        engine: "cloakbrowser",
-        version: "override",
-        stealthArgs: [],
-      };
+      return { executablePath, engine: "chrome", version: versionOf(executablePath) };
     }
-    throw new BrowserNotFoundError(
-      `CLOAKBROWSER_BINARY_PATH=${executablePath} does not exist`,
-    );
+    throw new BrowserNotFoundError(`CHROME_EXECUTABLE_PATH=${executablePath} does not exist`);
   }
 
-  // 2. Auto-detected CloakBrowser cache (~/.cloakbrowser).
-  const cacheDir =
-    process.env.CLOAKBROWSER_CACHE_DIR || path.join(os.homedir(), ".cloakbrowser");
-  const cloak = findCloakBinaryInCache(cacheDir);
-  if (cloak) return cloak;
+  // 2. PATH lookup (what apt / snap installs provide).
+  for (const name of CANDIDATE_NAMES) {
+    const dirs = (process.env.PATH || "").split(path.delimiter);
+    for (const dir of dirs) {
+      if (!dir) continue;
+      const candidate = path.join(dir, name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return { executablePath: candidate, engine: "chrome", version: versionOf(candidate) };
+      } catch {
+        // keep looking
+      }
+    }
+  }
+
+  // 3. Known install locations.
+  for (const candidate of CANDIDATE_PATHS) {
+    if (candidate.includes("*")) {
+      // glob-ish: expand the wildcard segment manually
+      const [prefix, suffix] = candidate.split("*");
+      const parent = path.dirname(prefix);
+      try {
+        if (!fs.existsSync(parent)) continue;
+        const entries = fs
+          .readdirSync(parent)
+          .filter((name) => name.startsWith(path.basename(prefix)))
+          .sort()
+          .reverse();
+        for (const entry of entries) {
+          const full = path.join(parent, entry, suffix);
+          try {
+            fs.accessSync(full, fs.constants.X_OK);
+            return { executablePath: full, engine: "chrome", version: versionOf(full) };
+          } catch {
+            // next entry
+          }
+        }
+      } catch {
+        // unreadable dir — keep going
+      }
+      continue;
+    }
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { executablePath: candidate, engine: "chrome", version: versionOf(candidate) };
+    } catch {
+      // keep looking
+    }
+  }
 
   throw new BrowserNotFoundError(
-    `CloakBrowser binary not found (looked in ${cacheDir}). ` +
-      `Install it with: npx cloakbrowser install`,
+    "Chrome/Chromium binary not found. Install it with: " +
+      "`npx @puppeteer/browsers install chrome@stable` or `apt-get install -y chromium`, " +
+      "or set CHROME_EXECUTABLE_PATH.",
   );
+}
+
+/** Home directory of the account running the API (root on the VM). */
+export function homeDir(): string {
+  return os.homedir();
 }

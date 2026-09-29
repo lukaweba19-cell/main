@@ -208,6 +208,7 @@ async function crawl(
   log: (msg: string) => void,
   seedUrl: string,
   capture?: XReactorCapture,
+  launchOpts?: { profileId?: string; cfVerify?: boolean },
 ): Promise<XReactorResult> {
   return xreactorBrowserPool.run(async () => {
     const startMs = Date.now();
@@ -226,7 +227,7 @@ async function crawl(
       log(`[xreactor] ${seedUrl} no dedicated display available, using shared DISPLAY`);
     }
 
-    const browser = await launchIsolatedBrowser(log, display);
+    const browser = await launchIsolatedBrowser(log, display, launchOpts);
     launchMs = Date.now() - startMs;
     log(`[xreactor] ${seedUrl} browser launched in ${launchMs}ms`);
 
@@ -383,6 +384,13 @@ export const handleXReactorCheck = async (
 
   const log = (msg: string) => request.log.info(msg);
 
+  // Profile management: profileId selects an uploaded /v1/profiles profile for
+  // every check in this request; omitted => the durable default profile.
+  const launchOpts = {
+    profileId: request.body.profileId,
+    cfVerify: request.body.cfVerify === true,
+  };
+
   const sessionService = (request as any).server?.sessionService;
   const cdpService = (request as any).server?.cdpService;
   const captureFor = (seedUrl: string) =>
@@ -391,7 +399,7 @@ export const handleXReactorCheck = async (
   try {
     if (normalizedUrls.length === 1) {
       const capture = captureFor(normalizedUrls[0]);
-      const result = await crawl(log, normalizedUrls[0], capture);
+      const result = await crawl(log, normalizedUrls[0], capture, launchOpts);
       return reply.send(result);
     }
 
@@ -403,7 +411,7 @@ export const handleXReactorCheck = async (
       normalizedUrls.map(async (target): Promise<XReactorResult> => {
         const capture = captureFor(target);
         try {
-          return await crawl(log, target, capture);
+          return await crawl(log, target, capture, launchOpts);
         } catch (e: unknown) {
           const error = getErrors(e);
           request.log.warn({ err: error, url: target }, "xreactor batch item failed");

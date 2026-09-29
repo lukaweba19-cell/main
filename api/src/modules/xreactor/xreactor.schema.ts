@@ -17,6 +17,19 @@ const XReactorCheckRequest = z
       .array(z.string())
       .optional()
       .describe("Alternative to `url`: an array of page URLs to check"),
+    profileId: z
+      .string()
+      .uuid()
+      .optional()
+      .describe(
+        "Uploaded profile (/v1/profiles) to run the checks with. Omitted: the persistent default profile (single durable fingerprint) is used.",
+      ),
+    cfVerify: z
+      .boolean()
+      .optional()
+      .describe(
+        "Run nodriver-cf-verify (Cloudflare Turnstile auto-click) on challenge pages",
+      ),
   })
   .refine((body) => Boolean(body.url) || Boolean(body.urls?.length), {
     message: "Provide `url` (string or array) or `urls` (array)",

@@ -1,6 +1,6 @@
 import { flushRecording } from "../utils/recording-store.js";
 import { FastifyBaseLogger } from "fastify";
-import { mkdir } from "fs/promises";
+import { mkdir, readdir, stat } from "fs/promises";
 import os from "os";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
@@ -80,6 +80,8 @@ export class SessionService {
     sessionExtensions?: string[];
     logSinkUrl?: string;
     userDataDir?: string;
+    /** Uploaded profile id (/v1/profiles) to run this session with. */
+    profileId?: string;
     persist?: boolean;
     blockAds?: boolean;
     optimizeBandwidth?: boolean | OptimizeBandwidthOptions;
@@ -147,10 +149,42 @@ export class SessionService {
       deviceConfig,
     });
 
-    const userDataDir =
-      options.userDataDir || options.persist === true
-        ? path.join(process.cwd(), "user-data-dir")
-        : env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome");
+    // Profile selection: an explicit userDataDir wins, then an uploaded
+    // profileId (/v1/profiles) materialized into a fresh dir, then the durable
+    // default profile (persistent fingerprint) for persist=true, else the
+    // tmpdir profile for throwaway sessions.
+    let userDataDir: string;
+    if (options.userDataDir) {
+      userDataDir = options.userDataDir;
+    } else if (options.profileId) {
+      const { ProfileService } = await import("./profile.service.js");
+      const extract = (await import("extract-zip")).default;
+      const meta = ProfileService.getInstance().get(options.profileId) as
+        | { userDataDir?: string | null }
+        | null;
+      if (!meta?.userDataDir) {
+        throw new Error(`Profile ${options.profileId} not found or has no userDataDir`);
+      }
+      const { randomUUID } = await import("crypto");
+      userDataDir = path.join(os.tmpdir(), `steel-profile-${randomUUID()}`);
+      await mkdir(userDataDir, { recursive: true });
+      await extract(meta.userDataDir, { dir: userDataDir });
+      // Unwrap a single root folder if the archive packed one.
+      try {
+        const entries = await readdir(userDataDir);
+        if (entries.length === 1) {
+          const only = path.join(userDataDir, entries[0]);
+          if ((await stat(only)).isDirectory()) userDataDir = only;
+        }
+      } catch {
+        // keep the extraction root
+      }
+    } else if (options.persist === true) {
+      userDataDir = env.CHROME_USER_DATA_DIR || path.join(process.cwd(), "user-data-dir");
+    } else {
+      const { ensureDefaultProfile } = await import("../utils/default-profile.js");
+      userDataDir = ensureDefaultProfile();
+    }
     await mkdir(userDataDir, { recursive: true });
 
     const defaultUserPreferences = {
