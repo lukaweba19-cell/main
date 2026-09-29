@@ -16,6 +16,8 @@ import {
   PER_PAGE_TIMEOUT_MS,
   harvestLinks,
   scanTextForCloud,
+  isAdLikeExported as isAdLike,
+  isBinaryLikeExported as isBinaryLike,
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
@@ -120,6 +122,48 @@ async function visitPage(
       const harvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
       candidates = harvest.candidates;
       skipped = harvest.skipped;
+
+      // Telegram channel t.g pages embed the channel's DESCRIPTION (bio) in
+      // the page markup. That bio often carries the links the channel
+      // advertises (e.g. a usrlink.io/cloud-bridge page) — treat every link
+      // found in the profile text as a follow candidate. Visiting t.me links
+      // directly is not possible (they auto-open the desktop app and stall
+      // the browser), so the description is the only way through — and it is
+      // also scanned for cloud mentions like any other page text.
+      const isTelegramProfile = /(^|\.)t\.me$|(^|\.)telegram\.(me|org|dog)$/.test(
+        new URL(verdict.finalUrl || url).hostname,
+      );
+      if (isTelegramProfile) {
+        // Bio/description text: visible body text is enough — it contains the
+        // channel description with the advertised links.
+        const descText = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
+        const descLinks = Array.from(
+          String(descText).matchAll(/https?:\/\/[^\s<>()\"']+/g),
+        )
+          .map((m) => m[0].replace(/[).,;'\"]+$/, ""))
+          .filter((u) => {
+            try {
+              const u2 = new URL(u);
+              return (
+                (u2.protocol === "http:" || u2.protocol === "https:") &&
+                !isAdLike(u2) &&
+                !isBinaryLike(u2) &&
+                u2.hostname !== new URL(verdict.finalUrl || url).hostname
+              );
+            } catch {
+              return false;
+            }
+          });
+        const seenDesc = new Set(candidates.map((c) => c.url));
+        for (const u of descLinks) {
+          const key = u.replace(/\/$/, "");
+          if (seenDesc.has(key)) continue;
+          seenDesc.add(key);
+          candidates.push({ url: key, text: "telegram-profile-link" });
+        }
+        // Description text itself is already in `markdown`, so scanTextForCloud
+        // covers it — no extra scanning needed here.
+      }
     }
 
     t = Date.now();

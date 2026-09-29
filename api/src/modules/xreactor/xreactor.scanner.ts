@@ -328,6 +328,10 @@ export interface LinkHarvest {
   skipped: { ad: number; binary: number; foreign: number; other: number };
 }
 
+export function isAdLikeExported(url: URL): boolean {
+  return isAdLike(url);
+}
+
 function isAdLike(url: URL): boolean {
   const host = url.hostname.toLowerCase();
   // Whole-host substrings (vendor domains) ...
@@ -338,6 +342,10 @@ function isAdLike(url: URL): boolean {
   const full = url.toString().toLowerCase();
   if (AD_URL_FRAGMENT_PATTERNS.some((p) => full.includes(p))) return true;
   return false;
+}
+
+export function isBinaryLikeExported(url: URL): boolean {
+  return isBinaryLike(url);
 }
 
 function isBinaryLike(url: URL): boolean {
