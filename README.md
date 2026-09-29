@@ -109,8 +109,9 @@ The isolation is enforced inside the API itself (`api/src/modules/xreactor/xreac
   when the request arrives under that same Host — the domain cannot reach any
   other part of the API, and the IP:3000 address cannot reach `/xreactor`.
 - Optional shared-secret: set `XREACTOR_EDGE_TOKEN` in `api/.env` and have
-  Caddy inject `header_up X-XReacto-Edge <token>`; this blocks Host-header
-  spoofing straight against the IP.
+  Caddy inject `header_up X-Xreactor-Edge <token>`; this blocks Host-header
+  spoofing straight against the IP. `scripts/xreactor-edge.sh` (run on the
+  VM) wires the token and the Caddy site block automatically.
 
 Caddy site block (in `/etc/caddy/Caddyfile`):
 
