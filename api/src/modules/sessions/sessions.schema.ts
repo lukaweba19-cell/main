@@ -71,11 +71,13 @@ const CreateSession = z.object({
     ),
   persist: z.boolean().optional().describe("Flag to indicate if session should be persisted"),
   userDataDir: z.string().optional().describe("User data directory path to use for the session"),
+  // "" (Scalar's try-it default) and null mean "default profile" — the union
+  // must stay schema-visible: Fastify validates the JSON schema BEFORE any
+  // zod transform runs, so z.preprocess alone would still 400 on "".
   profileId: z
-    .preprocess(
-      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v ?? undefined),
-      z.string().uuid().optional(),
-    )
+    .union([z.string().uuid(), z.literal("")])
+    .nullish()
+    .transform((v) => (typeof v === "string" && v ? v : undefined))
     .describe(
       "Uploaded profile (/v1/profiles) id to run this session with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used.",
     ),
