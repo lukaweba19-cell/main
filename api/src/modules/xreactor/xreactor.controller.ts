@@ -29,6 +29,10 @@ export interface PageVerdict {
   markdownChars: number;
   error?: string;
   followedFrom: string | null;
+  /** Timing breakdown per page (ms): navigation, ready-wait, extraction. */
+  navMs?: number;
+  readyMs?: number;
+  extractMs?: number;
 }
 
 export interface XReactorResult {
@@ -44,6 +48,8 @@ export interface XReactorResult {
   };
   timings: {
     totalMs: number;
+    /** Isolated-browser launch cost (ms). */
+    launchMs?: number;
   };
   error?: string;
 }
@@ -78,10 +84,12 @@ async function visitPage(
   };
 
   try {
+    let t = Date.now();
     const safeResponse = await safeGoto(page, url, {
       timeout: PER_PAGE_TIMEOUT_MS,
       waitUntil: "domcontentloaded",
     });
+    verdict.navMs = Date.now() - t;
 
     const response0 = safeResponse.response ?? safeResponse.pdfResponse;
     const contentType = response0?.headers()["content-type"]?.toLowerCase() || "";
@@ -89,7 +97,9 @@ async function visitPage(
     const isJson = isJsonContentType(contentType);
 
     if (!isPdf && !isJson) {
+      t = Date.now();
       await waitForCheckReady(page);
+      verdict.readyMs = Date.now() - t;
     }
 
     verdict.finalUrl = page.url();
@@ -104,6 +114,7 @@ async function visitPage(
       skipped = harvest.skipped;
     }
 
+    t = Date.now();
     let markdown = "";
     if (isJson) {
       markdown = (await response0?.text()) ?? "";
@@ -115,6 +126,7 @@ async function visitPage(
         markdown = url; // PDFs: at least scan the URL itself.
       }
     }
+    verdict.extractMs = Date.now() - t;
 
     const scan = scanTextForCloud(String(markdown || ""));
     verdict.cloudFound = scan.cloudFound;
@@ -137,7 +149,10 @@ async function visitPage(
 async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReactorResult> {
   return xreactorBrowserPool.run(async () => {
     const startMs = Date.now();
+    let launchMs = 0;
     const browser = await launchIsolatedBrowser(log);
+    launchMs = Date.now() - startMs;
+    log(`[xreactor] ${seedUrl} browser launched in ${launchMs}ms`);
 
     try {
       const { page } = browser;
@@ -205,8 +220,8 @@ async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReac
           skippedBinary: totals.binary,
           skippedOther: totals.other + totals.foreign,
         },
-        timings: { totalMs: Date.now() - startMs },
-      };
+        timings: { totalMs: Date.now() - startMs, launchMs },
+      } as XReactorResult;
     } finally {
       await browser.close();
     }
