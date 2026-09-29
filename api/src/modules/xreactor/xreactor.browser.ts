@@ -96,62 +96,62 @@ export async function launchIsolatedBrowser(log: (msg: string) => void): Promise
 export { BrowserNotFoundError as XReactorBrowserNotFoundError };
 
 /**
- * Lightweight page-ready detection for compliance checks — fully event-driven,
- * no fixed dwell anywhere:
+ * Lightweight page-ready detection for compliance checks — exits the moment
+ * REAL CONTENT is present, never before:
  *
- *   1. `waitForLoadState("load")` returns the instant the browser fires the
- *      load event (or the short cap hits) — never a fixed sleep.
- *   2. One DOM snapshot: real content present => done (typical page: 1-2s).
- *   3. Challenge interstitial: poll every 300ms and exit the MOMENT the solve
- *      clears — the wait is exactly as long as the solve takes, nothing more.
- *      Pages that simply never get content bail out at the first clear signal
- *      instead of burning a budget.
+ *   1. `waitForLoadState("load")` rides the browser's load event.
+ *   2. One snapshot: content present => done (typical page: 1-2s).
+ *   3. Challenge interstitial (or still-rendering page): poll every 300ms and
+ *      exit the instant real content shows up. Cloudflare solves trigger a
+ *      reload, so "challenge flag gone" is NOT enough — we keep polling
+ *      through the reload until the reloaded page actually has text.
+ *      Transient null snapshots during navigation are retried, never "done".
+ *
+ * The ceiling (XREACTOR_CHALLENGE_TIMEOUT_MS, default 20s) is only a failure
+ * bound for pages that never render content; happy pages leave immediately.
  */
 export async function waitForCheckReady(
   page: Page,
   opts: { readyTimeoutMs?: number; challengeTimeoutMs?: number } = {},
-): Promise<{ waitedMs: number; challengeCleared: boolean }> {
+): Promise<{ waitedMs: number; challengeCleared: boolean; contentReady: boolean }> {
   const start = Date.now();
   const readyTimeoutMs = opts.readyTimeoutMs ?? 8_000;
   const challengeTimeoutMs =
     opts.challengeTimeoutMs ??
     Math.max(5_000, parseInt(process.env.XREACTOR_CHALLENGE_TIMEOUT_MS || "20000", 10) || 20_000);
 
-  // 1) Event-driven load wait: returns immediately when the page is already
-  //    loaded; otherwise fires as soon as the load event happens.
+  // 1) Event-driven load wait: returns immediately when already loaded.
   await page.waitForLoadState("load", { timeout: readyTimeoutMs }).catch(() => {});
 
   if (page.isClosed()) {
-    return { waitedMs: Date.now() - start, challengeCleared: false };
+    return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: false };
   }
 
-  // 2) One snapshot: real content => done. This is the happy path.
-  const snap = await snapshotPage(page).catch(() => null);
-  if (!snap) {
-    return { waitedMs: Date.now() - start, challengeCleared: false };
-  }
-  if (hasRealContent(snap)) {
-    return { waitedMs: Date.now() - start, challengeCleared: false };
+  // 2) Fast path: content already present.
+  let snap = await snapshotPage(page).catch(() => null);
+  if (snap && hasRealContent(snap)) {
+    return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: true };
   }
 
-  // 3) Challenge (or still-rendering) page: poll fast and exit the moment the
-  //    challenge clears. The budget only ever matters for pages that never
-  //    resolve — happy pages leave on the first successful poll.
+  // 3) Poll until real content exists — challenge solves reload the page, so
+  //    keep polling through the reload and out the other side.
   let challengeCleared = false;
+  let contentReady = false;
   const deadline = Date.now() + challengeTimeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 300));
     if (page.isClosed()) break;
-    const poll = await snapshotPage(page).catch(() => null);
-    if (!poll) break;
-    if (poll.challenge) continue;
+    snap = await snapshotPage(page).catch(() => null);
+    if (!snap) continue; // navigation in flight — retry, never treat as done
+    if (snap.challenge) continue; // still solving
     challengeCleared = true;
-    // The solve usually reloads into the real page — wait for its load event
-    // (event-driven) and end immediately after.
-    await page.waitForLoadState("load", { timeout: readyTimeoutMs }).catch(() => {});
-    break;
+    if (hasRealContent(snap)) {
+      contentReady = true;
+      break; // content just appeared — done, zero extra dwell
+    }
+    // Challenge cleared but content not rendered yet: keep polling.
   }
-  return { waitedMs: Date.now() - start, challengeCleared };
+  return { waitedMs: Date.now() - start, challengeCleared, contentReady };
 }
 
 /**

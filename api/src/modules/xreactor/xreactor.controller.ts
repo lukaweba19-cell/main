@@ -123,7 +123,16 @@ async function visitPage(
       const html = await page.content();
       const defuddled = await getDefuddleContent(html, verdict.finalUrl || url);
       markdown = defuddled.contentMarkdown ?? defuddled.content ?? "";
-      if (!markdown && isPdf) {
+      if (!markdown.trim()) {
+        // Defuddle found no article content (forums, JS-rendered threads).
+        // Fall back to the page's visible text so the cloud scan and link
+        // discovery still see everything the user sees.
+        const bodyText = await page
+          .evaluate(() => document.body?.innerText || "")
+          .catch(() => "");
+        if (bodyText.trim()) markdown = bodyText;
+      }
+      if (!markdown.trim() && isPdf) {
         markdown = url; // PDFs: at least scan the URL itself.
       }
     }
@@ -168,6 +177,7 @@ async function crawl(
       const followed: string[] = [];
       const visited = new Set<string>();
       const totals = { ad: 0, binary: 0, foreign: 0, other: 0 };
+      let discoveredCount = 0; // links seen on the seed page (before filtering)
       let queue: Array<{ url: string; from: string | null }> = [{ url: seedUrl, from: null }];
       const finishedPages = () => pages.filter((p) => p.status !== "error").length;
 
@@ -190,6 +200,11 @@ async function crawl(
         totals.other += skipped.other;
         pages.push(verdict);
 
+        if (item.from === null) {
+          // The seed page's link count — what the user sees in `links.found`.
+          discoveredCount = candidates.length;
+        }
+
         if (verdict.cloudFound) {
           finalResult = "disallowed";
           return {
@@ -197,7 +212,7 @@ async function crawl(
             seedUrl,
             pages,
             links: {
-              found: candidates.length,
+              found: item.from === null ? candidates.length : discoveredCount,
               followed,
               skippedAds: totals.ad,
               skippedBinary: totals.binary,
@@ -223,7 +238,7 @@ async function crawl(
         seedUrl,
         pages,
         links: {
-          found: followed.length,
+          found: discoveredCount,
           followed,
           skippedAds: totals.ad,
           skippedBinary: totals.binary,
