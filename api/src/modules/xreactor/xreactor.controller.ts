@@ -19,7 +19,7 @@ import {
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
-import { recordXReactorSession } from "./xreactor.sessions.js";
+import { startXReactorCapture } from "./xreactor.sessions.js";
 
 export interface PageVerdict {
   url: string;
@@ -144,10 +144,15 @@ async function visitPage(
 
 /**
  * The crawl for ONE seed URL in its own private browser:
- *   launch isolated CloakBrowser -> check seed -> follow up to
- *   MAX_EXTRA_PAGES links -> close + delete profile.
+ *   launch isolated CloakBrowser -> capture (video + console/network) ->
+ *   check seed -> follow up to MAX_EXTRA_PAGES links -> stop capture ->
+ *   close + delete profile.
  */
-async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReactorResult> {
+async function crawl(
+  log: (msg: string) => void,
+  seedUrl: string,
+  capture?: ReturnType<typeof startXReactorCapture>,
+): Promise<XReactorResult> {
   return xreactorBrowserPool.run(async () => {
     const startMs = Date.now();
     let launchMs = 0;
@@ -155,8 +160,10 @@ async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReac
     launchMs = Date.now() - startMs;
     log(`[xreactor] ${seedUrl} browser launched in ${launchMs}ms`);
 
+    let finalResult: "allowed" | "disallowed" = "allowed";
     try {
       const { page } = browser;
+      if (capture) capture.attach(page);
       const pages: PageVerdict[] = [];
       const followed: string[] = [];
       const visited = new Set<string>();
@@ -184,8 +191,9 @@ async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReac
         pages.push(verdict);
 
         if (verdict.cloudFound) {
+          finalResult = "disallowed";
           return {
-            result: "disallowed",
+            result: finalResult,
             seedUrl,
             pages,
             links: {
@@ -224,6 +232,15 @@ async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReac
         timings: { totalMs: Date.now() - startMs, launchMs },
       } as XReactorResult;
     } finally {
+      if (capture) {
+        await capture
+          .finish({
+            result: finalResult,
+            pagesChecked: 0, // not available here; recorder stop only needs the verdict
+            totalMs: Date.now() - startMs,
+          })
+          .catch(() => {});
+      }
       await browser.close();
     }
   });
@@ -256,10 +273,12 @@ export const handleXReactorCheck = async (
   const { url, urls } = request.body;
 
   // Accept one URL or many: `url` as string, `url` as array, or `urls` array.
+  // Blank entries (Scalar's try-it pre-fills `urls: [""]`) are ignored, not
+  // errors — only genuinely bad URLs are rejected.
   const rawUrls = [
     ...(Array.isArray(url) ? url : url ? [url] : []),
     ...(urls ?? []),
-  ];
+  ].map((u) => (typeof u === "string" ? u.trim() : "")).filter((u) => u.length > 0);
 
   if (rawUrls.length === 0) {
     return reply.code(400).send({ message: "Provide `url` (string or array) or `urls`" });
@@ -282,21 +301,14 @@ export const handleXReactorCheck = async (
   const log = (msg: string) => request.log.info(msg);
 
   const sessionService = (request as any).server?.sessionService;
-  const noteSession = (r: XReactorResult) => {
-    if (sessionService) {
-      recordXReactorSession(sessionService, {
-        seedUrl: r.seedUrl,
-        result: r.result,
-        pagesChecked: r.pages.filter((p) => p.status !== "error").length,
-        totalMs: r.timings.totalMs,
-      });
-    }
-  };
+  const cdpService = (request as any).server?.cdpService;
+  const captureFor = (seedUrl: string) =>
+    sessionService && cdpService ? startXReactorCapture(sessionService, cdpService, seedUrl) : undefined;
 
   try {
     if (normalizedUrls.length === 1) {
-      const result = await crawl(log, normalizedUrls[0]);
-      noteSession(result);
+      const capture = captureFor(normalizedUrls[0]);
+      const result = await crawl(log, normalizedUrls[0], capture);
       return reply.send(result);
     }
 
@@ -306,10 +318,9 @@ export const handleXReactorCheck = async (
     const batchStart = Date.now();
     const settled = await Promise.all(
       normalizedUrls.map(async (target): Promise<XReactorResult> => {
+        const capture = captureFor(target);
         try {
-          const r = await crawl(log, target);
-          noteSession(r);
-          return r;
+          return await crawl(log, target, capture);
         } catch (e: unknown) {
           const error = getErrors(e);
           request.log.warn({ err: error, url: target }, "xreactor batch item failed");
