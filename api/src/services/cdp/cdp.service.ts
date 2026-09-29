@@ -778,10 +778,18 @@ export class CDPService extends EventEmitter {
         );
 
         // Final setup steps: instrument every current and future target.
+        // connectOverCDP browsers have no browser.pages(); enumerate via the
+        // default context instead (connectOverCDP still surfaces future pages
+        // through context events).
         await executeOptional(
           this.logger,
           async () => {
-            for (const page of await (this.browserInstance as any).pages()) {
+            const contextForPages =
+              this.defaultContext ?? this.browserInstance!.contexts()[0] ?? null;
+            const pagesToInstrument = contextForPages
+              ? await contextForPages.pages()
+              : [];
+            for (const page of pagesToInstrument) {
               await this.attachPageInstrumentation(page);
             }
           },
