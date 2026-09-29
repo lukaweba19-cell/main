@@ -105,10 +105,16 @@ async function visitPage(
 
     verdict.finalUrl = page.url();
 
-    // Links come from the raw DOM — markdown strips hrefs.
+    // Links come from the raw DOM — markdown strips hrefs. JS-rendered pages
+    // populate <a> elements after load, so wait (event-driven) until anchors
+    // exist before harvesting; returns early the moment they appear.
     let candidates: ClassifiedLink[] = [];
     let skipped = EMPTY_SKIPPED;
     if (!isPdf) {
+      await page
+        .waitForFunction(() => document.links && document.links.length > 0, { timeout: 6_000 })
+        .catch(() => {}); // genuinely link-less pages just fall through
+
       const rawHtml = await page.content();
       const harvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
       candidates = harvest.candidates;
