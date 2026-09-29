@@ -42,7 +42,7 @@
     "build": "tsc && npm run copy:templates && npm run copy:python",
     "lint": "eslint . --ext ts --report-unused-disable-directives --max-warnings 10",
     "copy:templates": "mkdir -p build/templates && cp -r src/templates/* build/templates/",
-    "copy:python": "mkdir -p build/python && cp src/python/*.py src/python/requirements.txt build/python/",
+    "copy:python": "mkdir -p build/python && cp python/*.py python/requirements.txt build/python/",
     "prepare:recorder": "cd extensions/recorder && npm install && npm run build",
     "dev": "npm run prepare:recorder && tsx watch src/index.ts",
     "test": "vitest run",
