@@ -31,6 +31,8 @@ import { BrowserNotFoundError, resolveBrowser } from "../../utils/resolve-browse
 import {
   nodriverLaunch,
   nodriverClose,
+  getSessionCdpPort,
+  setSessionCdpPort,
   type NodriverLaunchResult,
 } from "../../utils/nodriver-client.js";
 import {
@@ -681,6 +683,11 @@ export class CDPService extends EventEmitter {
           );
         }
         this.nodriverPid = launched.pid ?? null;
+        // nodriver picks its own free CDP port; record it so consumers that
+        // used to assume 9222 (DevTools proxy, ws proxy, casting) follow along.
+        if (launched.port) {
+          setSessionCdpPort(launched.port);
+        }
 
         // Attach Node to the nodriver-owned browser over CDP. From here on the
         // entire Steel pipeline (targets, instrumentation, proxying) works
@@ -1147,7 +1154,7 @@ export class CDPService extends EventEmitter {
       socket,
       head,
       {
-        target: `ws://127.0.0.1:${env.CDP_REDIRECT_PORT}`,
+        target: `ws://127.0.0.1:${getSessionCdpPort() || env.CDP_REDIRECT_PORT}`,
       },
       (error) => {
         if (error) {

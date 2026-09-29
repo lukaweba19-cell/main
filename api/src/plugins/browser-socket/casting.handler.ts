@@ -14,6 +14,7 @@ import {
   PageInfo,
 } from "../../types/casting.js";
 import { getPageFavicon, getPageTitle, navigatePage } from "../../utils/casting.js";
+import { getSessionCdpPort } from "../../utils/nodriver-client.js";
 
 export async function handleCastSession(
   request: IncomingMessage,
@@ -166,9 +167,10 @@ export async function handleCastSession(
 
     try {
       // Attach to the running browser over its CDP websocket (patchright).
+      // nodriver picks a fresh CDP port per launch — use the live one.
       const { chromium } = await import("patchright");
       const browser = await chromium.connectOverCDP(
-        `http://127.0.0.1:${env.CDP_REDIRECT_PORT}`,
+        `http://127.0.0.1:${getSessionCdpPort() || env.CDP_REDIRECT_PORT}`,
       );
       const contexts = browser.contexts();
       context = contexts[0] ?? (await browser.newContext());

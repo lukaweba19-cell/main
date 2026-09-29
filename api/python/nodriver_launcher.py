@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import signal
 import socket
 import stat
@@ -91,6 +92,28 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _resolve_chrome() -> str | None:
+    """Best-effort Chrome/Chromium discovery (same order as the Node resolver)."""
+    candidates = [
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/opt/google/chrome/chrome",
+    ]
+    for candidate in candidates:
+        try:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        except OSError:
+            continue
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def _write_env_wrapper(real_executable: str, env: dict[str, str]) -> str:
     """Create a wrapper script that exports env then execs the real browser."""
     fd, wrapper = tempfile.mkstemp(prefix="nodriver-wrap-", suffix=".sh")
@@ -112,15 +135,21 @@ async def _launch(payload: dict) -> dict:
 
     Path(profile).mkdir(parents=True, exist_ok=True)
 
-    port = int(payload.get("port") or 0) or _free_port()
     display = payload.get("display") or os.environ.get("DISPLAY", ":10")
     window = payload.get("window") or [1920, 1080]
-    executable = payload.get("executable") or os.environ.get("CHROME_EXECUTABLE_PATH") or None
+    executable = (
+        payload.get("executable")
+        or os.environ.get("CHROME_EXECUTABLE_PATH")
+        or _resolve_chrome()
+    )
     extensions = payload.get("extensions") or []
     lang = payload.get("lang") or "en-US"
     per_launch_env = dict(payload.get("env") or {})
     per_launch_env.setdefault("DISPLAY", display)
     want_cf_verify = bool(payload.get("cfVerify")) and CF_VERIFY_AVAILABLE
+
+    if not executable:
+        return {"ok": False, "error": "could not resolve a Chrome executable"}
 
     args: list[str] = [
         "--no-first-run",
@@ -146,6 +175,9 @@ async def _launch(payload: dict) -> dict:
         wrapper = _write_env_wrapper(browser_executable, per_launch_env)
         browser_executable = wrapper
 
+    # NOTE: host/port must stay unset in this Config. nodriver treats a Config
+    # with BOTH host and port as "connect to an existing browser" and never
+    # spawns Chrome; it also injects --remote-debugging-port=<port> itself.
     config = uc.Config(
         user_data_dir=profile,
         headless=False,  # always headful on Xvfb, same as the rest of the stack
@@ -153,8 +185,6 @@ async def _launch(payload: dict) -> dict:
         browser_args=args,
         sandbox=False,  # root on the VM; nodriver would auto-disable anyway
         lang=lang,
-        host="127.0.0.1",
-        port=port,
     )
 
     try:
@@ -170,6 +200,21 @@ async def _launch(payload: dict) -> dict:
 
     ws = getattr(browser, "websocket_url", None)
     pid = getattr(browser, "_process_pid", None)
+    # nodriver picked the CDP port (free_port()); read it back from the
+    # live endpoint so /close and /cfverify target the right instance.
+    try:
+        port = int(ws.split("/")[2].rsplit(":", 1)[1])
+    except Exception:
+        port = 0
+    if not port and pid is not None:
+        try:
+            with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+                for token in f.read().split(b"\0"):
+                    if token.startswith(b"--remote-debugging-port="):
+                        port = int(token.split(b"=")[1])
+                        break
+        except Exception:
+            port = 0
 
     if want_cf_verify and browser.tabs:
         try:
@@ -182,6 +227,12 @@ async def _launch(payload: dict) -> dict:
 
     if pid is not None:
         BROWSERS[int(pid)] = {"browser": browser, "port": port, "wrapper": wrapper}
+
+    if not ws or not pid or not port:
+        return {
+            "ok": False,
+            "error": f"browser started but CDP endpoint unresolved (ws={ws!r} pid={pid} port={port})",
+        }
 
     return {
         "ok": True,

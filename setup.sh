@@ -100,6 +100,21 @@ ensure_python_sidecar() {
   # Optional Turnstile auto-verify (DOM-based, no OpenCV).
   "${API_DIR}/python/.venv/bin/pip" install -q "git+https://github.com/omegastrux/nodriver-cf-verify.git" \
     || log "  nodriver-cf-verify unavailable (optional)"
+  # Python 3.14 rejects undeclared non-UTF-8 bytes; nodriver ships a latin-1
+  # "±" in a cdp comment (network.py "JSON (±Inf)"). Patch it to ASCII.
+  local netfile
+  for netfile in "${API_DIR}"/python/.venv/lib/python3.*/site-packages/nodriver/cdp/network.py; do
+    [[ -f "${netfile}" ]] || continue
+    if LC_ALL=C grep -q $'\xc2\xb1' "${netfile}" 2>/dev/null; then
+      python3 -c "
+import sys
+p = sys.argv[1]
+d = open(p, 'rb').read()
+open(p, 'wb').write(d.replace(b'JSON (\\xc2\\xb1Inf)', b'JSON (+/-Inf)'))
+print('patched non-UTF-8 byte in', p)
+" "${netfile}"
+    fi
+  done
   log "  python sidecar ready: ${API_DIR}/python/.venv/bin/python"
 }
 ensure_python_sidecar
@@ -176,6 +191,8 @@ build() {
 ensure_dirs() {
   # Clear stale chrome processes and profile locks from previous crashes.
   pkill -f 'remote-debugging-port' 2>/dev/null || true
+  # Stop any sidecar from a previous API run so it can't serve stale code.
+  pkill -f 'nodriver_launcher.py' 2>/dev/null || true
   sleep 1
   rm -f /tmp/steel-chrome/Singleton* 2>/dev/null || true
   rm -rf /tmp/xreactor-profile-* /tmp/xreactor-uploaded-* 2>/dev/null || true

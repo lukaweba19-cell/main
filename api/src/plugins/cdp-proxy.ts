@@ -2,12 +2,17 @@ import { FastifyPluginAsync, FastifyRequest, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import fastifyReplyFrom from "@fastify/reply-from";
 import http from "node:http";
+import { getSessionCdpPort } from "../utils/nodriver-client.js";
 
-const CHROME_DEBUG_ORIGIN = "http://127.0.0.1:9222";
+function chromeDebugOrigin(): string {
+  // nodriver picks a fresh free CDP port per launch; fall back to the legacy
+  // fixed port when no session browser has been launched yet.
+  return `http://127.0.0.1:${getSessionCdpPort() || 9222}`;
+}
 
 function isChromeDebugUp(timeoutMs = 400): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get(`${CHROME_DEBUG_ORIGIN}/json/version`, { timeout: timeoutMs }, (res) => {
+    const req = http.get(`${chromeDebugOrigin()}/json/version`, { timeout: timeoutMs }, (res) => {
       res.resume();
       resolve((res.statusCode ?? 500) < 500);
     });
@@ -24,9 +29,9 @@ function isChromeDebugUp(timeoutMs = 400): Promise<boolean> {
  * from this server to the local Chrome remote-debugging port (9222).
  */
 const cdpProxyPlugin: FastifyPluginAsync = async (fastify) => {
-  await fastify.register(fastifyReplyFrom, {
-    base: CHROME_DEBUG_ORIGIN,
-  });
+  // reply-from is registered with no fixed base: the upstream origin is
+  // resolved per request (nodriver picks a fresh CDP port per launch).
+  await fastify.register(fastifyReplyFrom, { base: "" });
 
   const ensureBrowser = async (): Promise<boolean> => {
     // Never auto-launch Chrome for DevTools probes — scrapes own the lifecycle.
@@ -44,14 +49,15 @@ const cdpProxyPlugin: FastifyPluginAsync = async (fastify) => {
       });
     }
     try {
-      return await reply.from(target);
+      // Full-URL form: reply.from(upstreamUrl) overrides the registered base.
+      return await reply.from(`${chromeDebugOrigin()}${target}`);
     } catch (err: any) {
       const code = err?.code || err?.cause?.code;
       if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "ETIMEDOUT") {
         return reply.code(503).send({
           success: false,
           error: "Browser not running",
-          message: "Chrome remote debugging port is not reachable (9222).",
+          message: "Chrome remote debugging port is not reachable.",
         });
       }
       request.log.error({ err }, "CDP proxy error");

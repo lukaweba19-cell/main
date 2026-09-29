@@ -90,6 +90,21 @@ function venvPython(): string {
 let sidecarProcess: ChildProcess | null = null;
 let sidecarStarting: Promise<ChildProcess> | null = null;
 
+/**
+ * CDP port of the browser the API session owns (set by CDPService after each
+ * successful launch — nodriver always picks its own free port, so consumers
+ * like the DevTools proxy must follow this instead of assuming a fixed one).
+ */
+let sessionCdpPort = 0;
+
+export function setSessionCdpPort(port: number): void {
+  sessionCdpPort = Number(port) || 0;
+}
+
+export function getSessionCdpPort(): number {
+  return sessionCdpPort;
+}
+
 /** Ensure the Python sidecar is running (idempotent). */
 export async function ensureSidecar(): Promise<ChildProcess> {
   if (sidecarProcess && !sidecarProcess.killed && sidecarProcess.exitCode === null) {
