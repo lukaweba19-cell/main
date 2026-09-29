@@ -38,7 +38,9 @@ export function recordXReactorSession(
       debugUrl: "",
       debuggerUrl: "",
       sessionViewerUrl: "",
-      userAgent: "XReactor compliance check",
+      // Shown in the dashboard row; the response schema strips custom fields,
+      // so the verdict travels in the userAgent line instead.
+      userAgent: `XReactor: ${info.result.toUpperCase()} — ${info.seedUrl}`,
       proxy: "",
       xreactor: {
         seedUrl: info.seedUrl,
