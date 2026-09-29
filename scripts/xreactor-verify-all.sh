@@ -55,20 +55,25 @@ PY
 [ $? -ne 0 ] && bad "legacy fields" || ok "legacy fields"
 
 # Extensions must actually load into the isolated browser (Chrome 154 path).
+# nodriver's mechanism = --enable-unsafe-extension-debugging PLUS
+# DisableLoadExtensionCommandLineSwitch inside --disable-features (that combo
+# re-enables --load-extension on branded Chrome >= 137; nodriver then emits
+# --load-extension itself, which is EXPECTED).
 python3 - <<'PY'
-import json, subprocess, sys
+import sys
 log = open('/root/steel-browser/steel-api.log', 'rb').read()[-200000:].decode('utf-8', 'ignore')
-# nodriver logs "starting" with executable + arguments; extension loading adds
-# --enable-unsafe-extension-debugging when extensions are registered.
 recent = log[log.rfind('nodriver sidecar listening'):]
-if '--enable-unsafe-extension-debugging' in recent:
-    print("  PASS  extension feature flags present in launch args (nodriver add_extension path)")
-else:
-    print("  FAIL  no extension flags in recent launch args — extensions not loaded")
+problems = []
+if '--enable-unsafe-extension-debugging' not in recent:
+    problems.append('--enable-unsafe-extension-debugging missing')
+if 'DisableLoadExtensionCommandLineSwitch' not in recent:
+    problems.append('DisableLoadExtensionCommandLineSwitch missing from --disable-features')
+if '--load-extension=' not in recent:
+    problems.append('--load-extension missing (extensions not registered)')
+if problems:
+    print("  FAIL  " + "; ".join(problems))
     sys.exit(1)
-if '--load-extension=' in recent:
-    print("  FAIL  raw --load-extension still present (ignored by Chrome >= 137)")
-    sys.exit(1)
+print("  PASS  extension flags correct (nodriver add_extension mechanism active)")
 PY
 [ $? -ne 0 ] && bad "extensions" || ok "extensions"
 
