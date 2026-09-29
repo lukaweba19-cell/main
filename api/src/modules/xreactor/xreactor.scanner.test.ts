@@ -106,19 +106,23 @@ describe("harvestLinks", () => {
     expect(r.skipped.ad).toBe(1);
   });
 
-  it("filters messaging/app links that trigger external protocol dialogs", () => {
+  it("filters messaging app-install links; t.me channel pages stay followable", () => {
     const html = `
-      <a href="https://t.me/x_d9v">telegram channel</a>
       <a href="https://telegram.me/someone">telegram me</a>
       <a href="https://telegram.org/dl?tme=abc">telegram app link</a>
       <a href="https://wa.me/123456">whatsapp</a>
       <a href="https://discord.gg/abc">discord invite</a>
       <a href="https://m.me/somepage">messenger</a>
+      <a href="https://t.me/x_d9v">telegram channel</a>
       <a href="https://example.com/thread/7">clean</a>
     `;
     const r = harvestLinks(html, base);
-    expect(r.candidates.map((c) => c.url)).toEqual(["https://example.com/thread/7"]);
-    expect(r.skipped.ad).toBeGreaterThanOrEqual(6);
+    // t.me pages render real channel content — they must stay followable
+    // (the tg:// dialog is suppressed at the browser level instead).
+    expect(r.candidates.map((c) => c.url).sort()).toEqual(
+      ["https://example.com/thread/7", "https://t.me/x_d9v"].sort(),
+    );
+    expect(r.skipped.ad).toBeGreaterThanOrEqual(5);
   });
 
   it("dedupes links and caps at maxLinks", () => {

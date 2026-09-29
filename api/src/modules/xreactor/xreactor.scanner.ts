@@ -78,12 +78,13 @@ const AD_HOST_PATTERNS = [
   "gravatar",
   // Messaging / social app links: these pages auto-trigger external protocol
   // handlers (tg://, whatsapp://, ...) which pop native "Open xdg-open?"
-  // dialogs that stall headful checks. Never follow them.
-  "t.me",
-  "telegram.me",
+  // dialogs that stall headful checks. App-install/site domains are never
+  // followed (pure dead weight for content scanning). NOTE: t.me is
+  // deliberately NOT filtered — t.me/<channel> pages render real channel
+  // content (bio + message previews) the scan must see; the tg:// dialog is
+  // suppressed instead via the profile's protocol_handler.excluded_schemes.
   "telegram.org",
   "telegram.dog",
-  "tx.me",
   "wa.me",
   "whatsapp.com",
   "m.me",

@@ -56,6 +56,50 @@ export interface IsolatedBrowser {
  *   and its window is resized to fill it; otherwise it falls back to the
  *   shared DISPLAY (recording quality degrades, checks still work).
  */
+/**
+ * Schemes whose "Open <handler>?" dialogs must never appear: they block the
+ * single page and stall the whole check (t.me pages auto-fire tg:// on load).
+ * Pre-seeding protocol_handler.excluded_schemes in the profile's Preferences
+ * makes Chromium decline these silently — no dialog, no stall.
+ */
+const SUPPRESSED_PROTOCOL_SCHEMES = [
+  "tg",
+  "whatsapp",
+  "viber",
+  "skype",
+  "slack",
+  "zoommtg",
+  "ms-windows-store",
+  "discord",
+  "mailto",
+  "webcal",
+  "steam",
+  "spotify",
+];
+
+function seedProfilePreferences(profileDir: string): void {
+  try {
+    // Before first launch the profile has no dirs; Chromium requires the
+    // Default dir for Default/Preferences to stick.
+    fs.mkdirSync(path.join(profileDir, "Default"), { recursive: true });
+    const excluded: Record<string, number> = {};
+    for (const scheme of SUPPRESSED_PROTOCOL_SCHEMES) excluded[scheme] = 1;
+    const prefs = {
+      protocol_handler: { excluded_schemes: excluded },
+      credentials_enable_service: false,
+      sync_promo: { show_on_first_run_allowed: false },
+      distribution: { import_bookmarks: false, make_chrome_default: false },
+    };
+    fs.writeFileSync(
+      path.join(profileDir, "Default", "Preferences"),
+      JSON.stringify(prefs),
+    );
+  } catch {
+    // Preferences seeding is best-effort; the dialog suppression simply
+    // degrades to the old behavior if the file can't be written.
+  }
+}
+
 export async function launchIsolatedBrowser(
   log: (msg: string) => void,
   display?: XvfbDisplay | null,
@@ -63,6 +107,7 @@ export async function launchIsolatedBrowser(
   const resolved = resolveBrowser(); // throws BrowserNotFoundError when missing
   const profileDir = path.join(os.tmpdir(), `xreactor-profile-${randomUUID()}`);
   await fs.promises.mkdir(profileDir, { recursive: true });
+  seedProfilePreferences(profileDir);
 
   const extensionPaths = await getExtensionPaths();
   const width = display?.width ?? 1440;
