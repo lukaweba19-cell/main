@@ -219,8 +219,12 @@ export async function waitForCheckReady(
     opts.challengeTimeoutMs ??
     Math.max(5_000, parseInt(process.env.XREACTOR_CHALLENGE_TIMEOUT_MS || "20000", 10) || 20_000);
 
-  // 1) Event-driven load wait: returns immediately when already loaded.
-  await page.waitForLoadState("load", { timeout: readyTimeoutMs }).catch(() => {});
+  // 1) Event-driven load wait — but CAPPED SHORT. Some pages (t.me profiles)
+  //    never fire `load` promptly: a hanging subresource keeps it pending 9s+
+  //    while the DOM is already fully rendered. The snapshot loop below is
+  //    the real readiness decider, so this is only a fast-path accelerant:
+  //    3s max, then we start snapshotting whatever is on screen.
+  await page.waitForLoadState("load", { timeout: Math.min(3_000, readyTimeoutMs) }).catch(() => {});
 
   if (page.isClosed()) {
     return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: false };
