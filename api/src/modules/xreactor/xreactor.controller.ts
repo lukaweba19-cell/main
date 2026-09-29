@@ -1,14 +1,14 @@
 import { FastifyReply } from "fastify";
-import { Page } from "patchright";
-import { CDPService } from "../../services/cdp/cdp.service.js";
-import { SessionService } from "../../services/session.service.js";
 import { getErrors } from "../../utils/errors.js";
 import { normalizeUrl } from "../../utils/url.js";
 import { getDefuddleContent } from "../../utils/scrape/readability.js";
 import { isJsonContentType } from "../../utils/scrape/jsonToMarkdown.js";
 import { safeGoto } from "../../utils/scrape/safeGoTo.js";
-import { waitForPageContent } from "../../utils/scrape/content-ready.js";
-import { withScraperSession } from "../actions/actions.controller.js";
+import {
+  launchIsolatedBrowser,
+  waitForCheckReady,
+  xreactorBrowserPool,
+} from "./xreactor.browser.js";
 import {
   CRAWL_TOTAL_BUDGET_MS,
   MAX_EXTRA_PAGES,
@@ -19,6 +19,17 @@ import {
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
+
+export interface PageVerdict {
+  url: string;
+  finalUrl: string | null;
+  status: "ok" | "error" | "skipped";
+  cloudFound: boolean;
+  matches: Array<{ variant: string; excerpt: string }>;
+  markdownChars: number;
+  error?: string;
+  followedFrom: string | null;
+}
 
 export interface XReactorResult {
   result: "allowed" | "disallowed";
@@ -34,25 +45,25 @@ export interface XReactorResult {
   timings: {
     totalMs: number;
   };
+  error?: string;
 }
 
-interface PageVerdict {
-  url: string;
-  finalUrl: string | null;
-  status: "ok" | "error" | "skipped";
-  cloudFound: boolean;
-  matches: Array<{ variant: string; excerpt: string }>;
-  markdownChars: number;
-  error?: string;
-  followedFrom: string | null;
+interface LinkSkipCounters {
+  ad: number;
+  binary: number;
+  foreign: number;
+  other: number;
 }
+
+const EMPTY_SKIPPED: LinkSkipCounters = { ad: 0, binary: 0, foreign: 0, other: 0 };
 
 /**
- * Navigates to `url`, waits for real content, extracts markdown via Defuddle
- * and returns the verdict + all harvested candidate links for BFS.
+ * Navigates to `url`, waits for the text to be present (lightweight readiness,
+ * ~1-2s on normal pages), extracts markdown via Defuddle and returns the
+ * verdict + harvested candidate links for the follow queue.
  */
 async function visitPage(
-  page: Page,
+  page: import("patchright").Page,
   url: string,
   followedFrom: string | null,
 ): Promise<{ verdict: PageVerdict; candidates: ClassifiedLink[]; skipped: LinkSkipCounters }> {
@@ -65,7 +76,6 @@ async function visitPage(
     markdownChars: 0,
     followedFrom,
   };
-  const emptySkipped = { ad: 0, binary: 0, foreign: 0, other: 0 };
 
   try {
     const safeResponse = await safeGoto(page, url, {
@@ -79,18 +89,14 @@ async function visitPage(
     const isJson = isJsonContentType(contentType);
 
     if (!isPdf && !isJson) {
-      await waitForPageContent(page, {
-        timeoutMs: PER_PAGE_TIMEOUT_MS,
-        pollMs: 750,
-      });
+      await waitForCheckReady(page);
     }
 
     verdict.finalUrl = page.url();
 
-    // Harvest followable links from the raw DOM first — markdown strips
-    // hrefs, so it is useless for link discovery.
+    // Links come from the raw DOM — markdown strips hrefs.
     let candidates: ClassifiedLink[] = [];
-    let skipped = emptySkipped;
+    let skipped = EMPTY_SKIPPED;
     if (!isPdf) {
       const rawHtml = await page.content();
       const harvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
@@ -100,15 +106,13 @@ async function visitPage(
 
     let markdown = "";
     if (isJson) {
-      const raw = (await response0?.text()) ?? "";
-      markdown = raw;
+      markdown = (await response0?.text()) ?? "";
     } else {
       const html = await page.content();
       const defuddled = await getDefuddleContent(html, verdict.finalUrl || url);
       markdown = defuddled.contentMarkdown ?? defuddled.content ?? "";
       if (!markdown && isPdf) {
-        // PDFs: at least scan the URL itself.
-        markdown = url;
+        markdown = url; // PDFs: at least scan the URL itself.
       }
     }
 
@@ -121,48 +125,35 @@ async function visitPage(
   } catch (e: unknown) {
     verdict.status = "error";
     verdict.error = getErrors(e);
-    return { verdict, candidates: [], skipped: emptySkipped };
+    return { verdict, candidates: [], skipped: EMPTY_SKIPPED };
   }
 }
 
-interface LinkSkipCounters {
-  ad: number;
-  binary: number;
-  foreign: number;
-  other: number;
-}
+/**
+ * The crawl for ONE seed URL in its own private browser:
+ *   launch isolated CloakBrowser -> check seed -> follow up to
+ *   MAX_EXTRA_PAGES links -> close + delete profile.
+ */
+async function crawl(log: (msg: string) => void, seedUrl: string): Promise<XReactorResult> {
+  return xreactorBrowserPool.run(async () => {
+    const startMs = Date.now();
+    const browser = await launchIsolatedBrowser(log);
 
-/** The crawl: seed page + up to MAX_EXTRA_PAGES child links, breadth-first. */
-async function crawl(
-  sessionService: SessionService,
-  browserService: CDPService,
-  log: (msg: string) => void,
-  seedUrl: string,
-): Promise<XReactorResult> {
-  const startMs = Date.now();
-  const pages: PageVerdict[] = [];
-  const followed: string[] = [];
-  const visited = new Set<string>();
-  const totals = { ad: 0, binary: 0, foreign: 0, other: 0 };
-  let queue: Array<{ url: string; from: string | null; depth: number }> = [
-    { url: seedUrl, from: null, depth: 0 },
-  ];
+    try {
+      const { page } = browser;
+      const pages: PageVerdict[] = [];
+      const followed: string[] = [];
+      const visited = new Set<string>();
+      const totals = { ad: 0, binary: 0, foreign: 0, other: 0 };
+      let queue: Array<{ url: string; from: string | null }> = [{ url: seedUrl, from: null }];
+      const finishedPages = () => pages.filter((p) => p.status !== "error").length;
 
-  return withScraperSession(
-    sessionService,
-    browserService,
-    log,
-    {},
-    async (page) => {
       while (queue.length > 0) {
-        const elapsed = Date.now() - startMs;
-        if (elapsed > CRAWL_TOTAL_BUDGET_MS) {
-          log(`[xreactor] total budget exceeded (${elapsed}ms), stopping crawl`);
+        if (Date.now() - startMs > CRAWL_TOTAL_BUDGET_MS) {
+          log(`[xreactor] budget exceeded for ${seedUrl}, stopping crawl`);
           break;
         }
-        if (pages.filter((p) => p.status !== "skipped").length > MAX_EXTRA_PAGES) {
-          break;
-        }
+        if (finishedPages() > MAX_EXTRA_PAGES) break;
 
         const item = queue.shift()!;
         const key = item.url.replace(/\/$/, "");
@@ -177,7 +168,6 @@ async function crawl(
         pages.push(verdict);
 
         if (verdict.cloudFound) {
-          log(`[xreactor] cloud variant found on ${item.url} — early exit`);
           return {
             result: "disallowed",
             seedUrl,
@@ -193,14 +183,12 @@ async function crawl(
           };
         }
 
-        if (item.depth === 0) {
-          // Only the seed page's links seed the queue. Depth-1 pages are
-          // scanned for cloud but their links are not followed, which keeps
-          // the follow count at "up to 3 additional URLs".
+        if (item.from === null) {
+          // Only the seed page's links seed the follow queue (cap: 3 extra).
           for (const candidate of candidates) {
             if (followed.length >= MAX_EXTRA_PAGES) break;
             if (visited.has(candidate.url.replace(/\/$/, ""))) continue;
-            queue.push({ url: candidate.url, from: item.url, depth: 1 });
+            queue.push({ url: candidate.url, from: item.url });
             followed.push(candidate.url);
           }
         }
@@ -219,17 +207,33 @@ async function crawl(
         },
         timings: { totalMs: Date.now() - startMs },
       };
-    },
-  );
+    } finally {
+      await browser.close();
+    }
+  });
 }
 
-interface SingleResult extends XReactorResult {
-  error?: string;
-}
+const failedResult = (target: string, error: string): XReactorResult => ({
+  result: "allowed",
+  seedUrl: target,
+  pages: [
+    {
+      url: target,
+      finalUrl: null,
+      status: "error",
+      cloudFound: false,
+      matches: [],
+      markdownChars: 0,
+      followedFrom: null,
+      error,
+    },
+  ],
+  links: { found: 0, followed: [], skippedAds: 0, skippedBinary: 0, skippedOther: 0 },
+  timings: { totalMs: 0 },
+  error,
+});
 
 export const handleXReactorCheck = async (
-  sessionService: SessionService,
-  browserService: CDPService,
   request: XReactorRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> => {
@@ -262,52 +266,34 @@ export const handleXReactorCheck = async (
   const log = (msg: string) => request.log.info(msg);
 
   try {
-    // Single URL: exact same response shape as always.
     if (normalizedUrls.length === 1) {
-      const result = await crawl(sessionService, browserService, log, normalizedUrls[0]);
+      const result = await crawl(log, normalizedUrls[0]);
       return reply.send(result);
     }
 
-    // Batch: each URL runs its own full browser session lifecycle, strictly
-    // one at a time (the scrape pool serializes them). A failure on one URL
-    // is captured per-result and never stops the others.
+    // Batch: every URL gets its OWN browser, all running at the same time
+    // (bounded by XREACTOR_MAX_CONCURRENT). One URL failing never blocks the
+    // others.
     const batchStart = Date.now();
-    const results: SingleResult[] = [];
-    for (const target of normalizedUrls) {
-      try {
-        results.push(await crawl(sessionService, browserService, log, target));
-      } catch (e: unknown) {
-        const error = getErrors(e);
-        request.log.warn({ err: error, url: target }, "xreactor batch item failed");
-        results.push({
-          result: "allowed",
-          seedUrl: target,
-          pages: [
-            {
-              url: target,
-              finalUrl: null,
-              status: "error",
-              cloudFound: false,
-              matches: [],
-              markdownChars: 0,
-              followedFrom: null,
-              error,
-            },
-          ],
-          links: { found: 0, followed: [], skippedAds: 0, skippedBinary: 0, skippedOther: 0 },
-          timings: { totalMs: 0 },
-          error,
-        });
-      }
-    }
+    const settled = await Promise.all(
+      normalizedUrls.map(async (target): Promise<XReactorResult> => {
+        try {
+          return await crawl(log, target);
+        } catch (e: unknown) {
+          const error = getErrors(e);
+          request.log.warn({ err: error, url: target }, "xreactor batch item failed");
+          return failedResult(target, error);
+        }
+      }),
+    );
 
     return reply.send({
-      results,
+      results: settled,
       summary: {
-        total: results.length,
-        allowed: results.filter((r) => r.result === "allowed").length,
-        disallowed: results.filter((r) => r.result === "disallowed").length,
-        pagesErrored: results.reduce(
+        total: settled.length,
+        allowed: settled.filter((r) => r.result === "allowed").length,
+        disallowed: settled.filter((r) => r.result === "disallowed").length,
+        pagesErrored: settled.reduce(
           (n, r) => n + r.pages.filter((p) => p.status === "error").length,
           0,
         ),

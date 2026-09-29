@@ -31,11 +31,8 @@ import { scrapePool } from "../../utils/scrape/scrape-pool.js";
  *   -> promote to a live session (starts the recording)
  *   -> do the work on the primary page
  *   -> release the session (stops + flushes the recording)
- *
- * Shared with the /xreactor endpoint, which crawls seed + follow-up pages in
- * a single session lifecycle.
  */
-export async function withScraperSession<T>(
+async function withScraperSession<T>(
   sessionService: SessionService,
   browserService: CDPService,
   log: (msg: string) => void,

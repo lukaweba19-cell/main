@@ -62,21 +62,36 @@ curl -s http://127.0.0.1:3000/v1/health
 ## XReactor endpoint (`/xreactor`)
 
 A dedicated compliance endpoint that answers only via the
-`xreactor-bot.duckdns.org` hostname (plain HTTP through Caddy). It takes just
-a `url`, scrapes it to markdown (using the same CloakBrowser session flow as
-`/v1/scrape`, including challenge handling), and reports whether any spelling
-or variant of "cloud" appears:
+`xreactor-bot.duckdns.org` hostname (HTTPS through Caddy). It takes a `url`
+(string or array) and scrapes each page to markdown in its **own isolated
+CloakBrowser** — never the shared Steel session browser — then reports
+whether any spelling or variant of "cloud" appears:
 
 - Plain `cloud` and word stems (`clouds`, `cloudy`, `cloudflare`, ...)
 - Leetspeak/homoglyphs: `cl0ud`, `c1oud`, `kl0ud`, `c|oud`, cyrillic/greek o
 - Spaced/split: `c loud`, `c-l-o-u-d`, `cl.oud`
 - Related spellings: `kloud`, `cload`
 
-It also follows up to **3 additional pages** linked from the seed (ads,
+It also follows up to **3 additional pages** linked from each seed (ads,
 trackers, social widgets, binaries and non-http schemes are filtered out;
 `nofollow`/`sponsored` links are treated as ads). The first cloud hit ends the
 crawl early. Opening the domain root in a browser redirects to `/xreactor`,
-which shows a small usage page when no `url` parameter is given.
+which serves a Scalar OpenAPI reference scoped to this endpoint.
+
+### Isolation & scale
+
+- Every checked URL runs in its own throwaway CloakBrowser process with a
+  unique temp profile (closed and deleted afterwards) — no shared state, no
+  recordings, and nothing appears in the sessions UI.
+- Batch requests (`url` as array or `urls: [...]`, cap 25/request) check all
+  URLs **in parallel**, each in its own browser, bounded by
+  `XREACTOR_MAX_CONCURRENT` (default 4) to protect VM memory.
+- Readiness uses a lightweight text-presence check (~1-2s on normal pages);
+  only real challenge interstitials get a longer (30s) wait budget.
+- A daily-flush janitor (hourly pass) deletes recordings and session history
+  older than 24h and sweeps stale profile dirs — see
+  `api/src/utils/janitor.ts` (`RECORDINGS_MAX_AGE_HOURS`,
+  `SESSION_HISTORY_MAX_AGE_HOURS`).
 
 ```bash
 # POST

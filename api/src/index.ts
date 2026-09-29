@@ -12,6 +12,8 @@ import {
   hostIsXReactor,
   isXReactorPath,
 } from "./modules/xreactor/xreactor.acl.js";
+import { startMaintenanceLoop } from "./utils/janitor.js";
+import { sweepStaleProfiles } from "./modules/xreactor/xreactor.browser.js";
 
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -81,6 +83,16 @@ const startServer = async () => {
   try {
     await setupServer();
     await server.listen({ port: PORT, host: HOST });
+
+    // Daily flush: hourly pass deletes recordings + session history older
+    // than 24h (defaults) and sweeps stale xreactor profile dirs, keeping the
+    // server's memory and disk footprint flat.
+    server.sessionService &&
+      startMaintenanceLoop(
+        server.sessionService.pastSessions as Array<{ createdAt?: string }>,
+        (msg) => server.log.info(msg),
+        sweepStaleProfiles,
+      );
   } catch (err) {
     server.log.error(err);
     process.exit(1);

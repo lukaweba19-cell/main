@@ -131,7 +131,7 @@ async function routes(server: FastifyInstance) {
       },
     },
     async (request: XReactorRequest, reply: FastifyReply) =>
-      handleXReactorCheck(server.sessionService, server.cdpService, request, reply),
+      handleXReactorCheck(request, reply),
   );
 
   // GET serves ONLY the docs view (hidden from the OpenAPI spec). The check
