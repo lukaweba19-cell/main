@@ -18,6 +18,9 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-3000}"
 NODE_ENV="${NODE_ENV:-production}"
 
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
+
 # nodriver stack: resolve the Chrome/Chromium binary the Python sidecar will
 # launch, installing Google Chrome if nothing is present.
 CHROME_EXECUTABLE_PATH="${CHROME_EXECUTABLE_PATH:-}"
@@ -116,9 +119,6 @@ fi
 export DISPLAY="${DISPLAY:-:10}"
 export NODRIVER_SIDECAR_PORT="${NODRIVER_SIDECAR_PORT:-9224}"
 export NODRIVER_PYTHON="${API_DIR}/python/.venv/bin/python"
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
 
 check_deps() {
   log "Checking dependencies..."
