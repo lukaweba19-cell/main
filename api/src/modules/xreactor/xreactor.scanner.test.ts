@@ -20,8 +20,29 @@ describe("scanTextForCloud", () => {
 
   it("detects word stems: clouds, cloudy, cloudflare", () => {
     expect(scanTextForCloud("It is cloudy outside.").cloudFound).toBe(true);
-    expect(scanTextForCloud("Protected by Cloudflare").cloudFound).toBe(true);
     expect(scanTextForCloud("All the clouds gathered.").cloudFound).toBe(true);
+  });
+
+  it("ignores cloud-infrastructure vendor boilerplate", () => {
+    expect(
+      scanTextForCloud(
+        "Performance and Security by [Cloudflare](https://www.cloudflare.com/?utm_source=c)",
+      ).cloudFound,
+    ).toBe(false);
+    expect(
+      scanTextForCloud("Protected by Cloudflare — Ray ID 59b8286c · Privacy · Terms").cloudFound,
+    ).toBe(false);
+    expect(scanTextForCloud("Served via CloudFront and images by Cloudinary.").cloudFound).toBe(
+      false,
+    );
+  });
+
+  it("still flags real cloud mentions next to vendor noise", () => {
+    const r = scanTextForCloud(
+      "Performance and Security by Cloudflare. Store your backups in the cloud.",
+    );
+    expect(r.cloudFound).toBe(true);
+    expect(r.matches[0].excerpt).toContain("backups");
   });
 
   it("detects leetspeak and spaced variants", () => {

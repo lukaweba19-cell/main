@@ -89,6 +89,8 @@ function scalarReferenceHtml(server: FastifyInstance): string {
     customCss: scalarTheme,
     hideModels: false,
     showConsole: false,
+    // Remove the sidebar footer's "Open API Client" external button.
+    features: { apiClient: { enabled: false } },
   }).replace(/'/g, "&#39;");
 
   return `<!doctype html>
@@ -131,7 +133,10 @@ async function routes(server: FastifyInstance) {
       },
     },
     async (request: XReactorRequest, reply: FastifyReply) =>
-      handleXReactorCheck(request, reply),
+      handleXReactorCheck(
+        request as XReactorRequest & { server: { sessionService: unknown } },
+        reply,
+      ),
   );
 
   // GET serves ONLY the docs view (hidden from the OpenAPI spec). The check

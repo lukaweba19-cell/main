@@ -19,6 +19,7 @@ import {
   type ClassifiedLink,
 } from "./xreactor.scanner.js";
 import { MAX_URLS_PER_REQUEST, type XReactorRequest } from "./xreactor.schema.js";
+import { recordXReactorSession } from "./xreactor.sessions.js";
 
 export interface PageVerdict {
   url: string;
@@ -249,7 +250,7 @@ const failedResult = (target: string, error: string): XReactorResult => ({
 });
 
 export const handleXReactorCheck = async (
-  request: XReactorRequest,
+  request: XReactorRequest & { server?: { sessionService?: unknown } },
   reply: FastifyReply,
 ): Promise<FastifyReply> => {
   const { url, urls } = request.body;
@@ -280,9 +281,22 @@ export const handleXReactorCheck = async (
 
   const log = (msg: string) => request.log.info(msg);
 
+  const sessionService = (request as any).server?.sessionService;
+  const noteSession = (r: XReactorResult) => {
+    if (sessionService) {
+      recordXReactorSession(sessionService, {
+        seedUrl: r.seedUrl,
+        result: r.result,
+        pagesChecked: r.pages.filter((p) => p.status !== "error").length,
+        totalMs: r.timings.totalMs,
+      });
+    }
+  };
+
   try {
     if (normalizedUrls.length === 1) {
       const result = await crawl(log, normalizedUrls[0]);
+      noteSession(result);
       return reply.send(result);
     }
 
@@ -293,7 +307,9 @@ export const handleXReactorCheck = async (
     const settled = await Promise.all(
       normalizedUrls.map(async (target): Promise<XReactorResult> => {
         try {
-          return await crawl(log, target);
+          const r = await crawl(log, target);
+          noteSession(r);
+          return r;
         } catch (e: unknown) {
           const error = getErrors(e);
           request.log.warn({ err: error, url: target }, "xreactor batch item failed");

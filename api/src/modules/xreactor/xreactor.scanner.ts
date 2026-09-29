@@ -164,10 +164,49 @@ const NON_PAGE_EXTENSIONS = [
 ];
 
 /**
+ * Cloud-infrastructure boilerplate that pages inject automatically (footers,
+ * script tags, headers). These mention vendors like Cloudflare in CODE, not
+ * in CONTENT, so they must never flag a URL. Matched case-insensitively and
+ * removed before scanning.
+ */
+const VENDOR_NOISE_PATTERNS: RegExp[] = [
+  /performance\s+(and|&)?\s*security\s+by\s+\S+/gi,
+  /protected\s+by\s+\S+/gi,
+  /ddos\s+protection\s+by\s+\S+/gi,
+  /powered\s+by\s+\S*(?:cloud|cdn|edge)[^\s,.]{0,20}/gi,
+  /ray\s+id\s*[:#]?\s*[0-9a-f]{6,}/gi,
+  /\[?cloudflare\]?\s*\((?:https?:\/\/[^)]*cloudflare[^)]*)\)/gi,
+  /https?:\/\/[^\s)\]]*cloudflare[a-z]*\.com[^\s)\]]*/gi,
+  /https?:\/\/[^\s)\]]*cloudfront\.net[^\s)\]]*/gi,
+  /https?:\/\/[^\s)\]]*cloudinary\.com[^\s)\]]*/gi,
+  /https?:\/\/[^\s)\]]*res\.cloudinary[^\s)\]]*/gi,
+  /\/cdn-cgi\//gi,
+  /__cf[a-z_]{2,}/gi,
+  /cf[-_]ray/gi,
+  // Vendor product names on their own (Cloudflare, CloudFront, Cloudinary,
+  // ...) — infrastructure mentions, never content mentions.
+  /\b(?:cloudflare|cloudfront|cloudinary|cloudfoundry|cloudera|cloudways|cloudbeds)\b/gi,
+];
+
+/**
+ * Removes vendor noise lines/phrases from markdown before the cloud scan.
+ * Only strips the matched phrase itself (not the whole page), so genuine
+ * content around it still scans normally.
+ */
+export function stripVendorNoise(text: string): string {
+  let out = text || "";
+  for (const re of VENDOR_NOISE_PATTERNS) {
+    out = out.replace(re, " ");
+  }
+  return out;
+}
+
+/**
  * Cloud + related spellings, matched on the raw text (case-insensitive).
  * Prefix matching (no trailing word boundary) is intentional so stems like
- * "clouds", "cloudy", "clouded", "cloudflare", "cloudberry" all hit:
- * the requirement is "any mention of a cloud".
+ * "clouds", "cloudy", "clouded", "cloudberry" all hit:
+ * the requirement is "any mention of a cloud" IN CONTENT — vendor boilerplate
+ * is stripped first (see stripVendorNoise).
  */
 const O_SET = "0o\u043e\u039f\u03bf"; // 0, o, cyrillic/greek homoglyphs
 const L_SET = "l1|\u04c0\u0399\u03b9"; // l, 1, |, cyrillic/greek homoglyphs
@@ -202,9 +241,14 @@ export interface CloudScanResult {
  * Scans markdown/text for any cloud variant mention. Returns matched variant
  * labels plus a short excerpt around the first few hits for the response body.
  */
-export function scanTextForCloud(text: string): CloudScanResult {
+export function scanTextForCloud(rawText: string): CloudScanResult {
   const matches: CloudScanResult["matches"] = [];
-  if (!text) return { cloudFound: false, matches };
+  if (!rawText) return { cloudFound: false, matches };
+
+  // Vendor infrastructure boilerplate ("Performance and Security by
+  // Cloudflare", cloudfront URLs, ...) is code-injected noise, not content.
+  const text = stripVendorNoise(rawText);
+  if (!text.trim()) return { cloudFound: false, matches };
 
   const maxIdx = Math.min(text.length, 2_000_000);
   const haystack = text.slice(0, maxIdx);

@@ -32,13 +32,13 @@ export function flushOldRecordings(
   let bytesFreed = 0;
   try {
     if (!fs.existsSync(root)) return { filesRemoved, bytesFreed };
-    const cutoff = Date.now() - maxAgeMs;
+    const cutoff = maxAgeMs <= 0 ? Infinity : Date.now() - maxAgeMs;
     for (const name of fs.readdirSync(root)) {
       if (!name.endsWith(".mp4") && !name.endsWith(".json")) continue;
       const file = path.join(root, name);
       try {
         const stat = fs.statSync(file);
-        if (stat.mtimeMs < cutoff) {
+        if (cutoff === Infinity || stat.mtimeMs < cutoff) {
           bytesFreed += stat.size;
           fs.unlinkSync(file);
           filesRemoved += 1;
@@ -74,7 +74,7 @@ export function flushOldSessionHistory(
 export function runMaintenancePass(
   pastSessions: Array<{ createdAt?: string }>,
   log: (msg: string) => void,
-  sweepProfiles?: () => number,
+  sweepProfiles?: (maxAgeMs?: number) => number,
 ): void {
   const rec = flushOldRecordings();
   const sessions = flushOldSessionHistory(pastSessions);
@@ -88,16 +88,53 @@ export function runMaintenancePass(
   }
 }
 
-/** Starts the hourly maintenance loop. Returns a stop function. */
+/**
+ * Daily full flush: everything older than the max ages AND a hard clear of
+ * anything remaining past the DAILY_FLUSH hours. Runs inside the hourly loop
+ * via `daily`; call `force` to flush everything regardless of age.
+ */
+export function dailyFlush(
+  pastSessions: Array<{ createdAt?: string }>,
+  log: (msg: string) => void,
+  sweepProfiles?: (maxAgeMs?: number) => number,
+): void {
+  const rec = flushOldRecordings(RECORDINGS_ROOT, 0); // 0 = everything
+  const sessions = clearAllSessionHistory(pastSessions);
+  const profiles = sweepProfiles ? sweepProfiles(0) : 0;
+  log(
+    `[janitor] DAILY FLUSH: ${rec.filesRemoved} recording(s) (${(
+      rec.bytesFreed / 1024 / 1024
+    ).toFixed(1)} MB), ${sessions} session(s), ${profiles} profile dir(s)`,
+  );
+}
+
+/**
+ * Clears ALL released sessions from the in-memory history (used at startup
+ * so a restart always presents a clean dashboard, and by the daily flush).
+ */
+export function clearAllSessionHistory(pastSessions: Array<{ createdAt?: string }>): number {
+  const removed = pastSessions.length;
+  pastSessions.splice(0, removed);
+  return removed;
+}
+
+/** Starts the hourly maintenance loop with a built-in 24h daily flush. */
 export function startMaintenanceLoop(
   pastSessions: Array<{ createdAt?: string }>,
   log: (msg: string) => void,
-  sweepProfiles?: () => number,
+  sweepProfiles?: (maxAgeMs?: number) => number,
 ): () => void {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  let lastDailyFlush = Date.now();
+
   const timer = setInterval(
     () => {
       try {
         runMaintenancePass(pastSessions, log, sweepProfiles);
+        if (Date.now() - lastDailyFlush >= DAY_MS) {
+          dailyFlush(pastSessions, log, sweepProfiles);
+          lastDailyFlush = Date.now();
+        }
       } catch (e) {
         log(`[janitor] maintenance pass failed: ${e instanceof Error ? e.message : String(e)}`);
       }

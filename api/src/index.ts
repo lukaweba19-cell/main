@@ -12,7 +12,12 @@ import {
   hostIsXReactor,
   isXReactorPath,
 } from "./modules/xreactor/xreactor.acl.js";
-import { startMaintenanceLoop } from "./utils/janitor.js";
+import {
+  startMaintenanceLoop,
+  runMaintenancePass,
+  clearAllSessionHistory,
+  flushOldRecordings,
+} from "./utils/janitor.js";
 import { sweepStaleProfiles } from "./modules/xreactor/xreactor.browser.js";
 
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -86,13 +91,20 @@ const startServer = async () => {
 
     // Daily flush: hourly pass deletes recordings + session history older
     // than 24h (defaults) and sweeps stale xreactor profile dirs, keeping the
-    // server's memory and disk footprint flat.
-    server.sessionService &&
-      startMaintenanceLoop(
-        server.sessionService.pastSessions as Array<{ createdAt?: string }>,
-        (msg) => server.log.info(msg),
-        sweepStaleProfiles,
-      );
+    // server's memory and disk footprint flat. A restart also flushes the
+    // previous process' stale in-memory session history immediately.
+    if (server.sessionService) {
+      const pastSessions = server.sessionService.pastSessions as Array<{ createdAt?: string }>;
+      const flushed = clearAllSessionHistory(pastSessions);
+      const recs = flushOldRecordings();
+      if (flushed || recs.filesRemoved) {
+        server.log.info(
+          `[janitor] startup flush: ${flushed} stale session(s), ${recs.filesRemoved} old recording(s)`,
+        );
+      }
+      startMaintenanceLoop(pastSessions, (msg) => server.log.info(msg), sweepStaleProfiles);
+      void runMaintenancePass; // referenced via the loop; keep import used
+    }
   } catch (err) {
     server.log.error(err);
     process.exit(1);

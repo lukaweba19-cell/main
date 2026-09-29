@@ -154,7 +154,10 @@ export async function waitForCheckReady(
   return { waitedMs: Date.now() - start, challengeCleared };
 }
 
-/** Sweeps leftover xreactor profile dirs from crashed runs. */
+/**
+ * Sweeps leftover xreactor profile dirs from crashed runs.
+ * maxAgeMs <= 0 removes every leftover regardless of age (daily flush).
+ */
 export function sweepStaleProfiles(maxAgeMs = 60 * 60 * 1000): number {
   const tmp = os.tmpdir();
   let removed = 0;
@@ -164,7 +167,7 @@ export function sweepStaleProfiles(maxAgeMs = 60 * 60 * 1000): number {
       const dir = path.join(tmp, name);
       try {
         const age = Date.now() - fs.statSync(dir).mtimeMs;
-        if (age > maxAgeMs) {
+        if (maxAgeMs <= 0 || age > maxAgeMs) {
           fs.rmSync(dir, { recursive: true, force: true });
           removed += 1;
         }
