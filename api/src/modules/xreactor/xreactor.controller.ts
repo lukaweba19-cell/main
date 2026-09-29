@@ -196,7 +196,7 @@ async function crawl(
     try {
       const { page } = browser;
       if (capture) {
-        capture.startRecorder(); // films the dedicated display from the start
+        capture.startRecorder(display); // films the dedicated display from the start
         capture.attach(page);
       }
       const followed: string[] = [];

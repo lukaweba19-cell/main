@@ -28,8 +28,8 @@ export interface XReactorCapture {
   sessionId: string;
   /** Attach event listeners to the crawl page (call once, before navigating). */
   attach: (page: Page) => void;
-  /** Begin the ffmpeg capture on this check's dedicated display. */
-  startRecorder: () => void;
+  /** Begin the ffmpeg capture on the given dedicated display. */
+  startRecorder: (display?: XvfbDisplay | null) => void;
   /** Stop the video recorder; finalizes the dashboard row. */
   finish: (info: { result: "allowed" | "disallowed"; pagesChecked: number; totalMs: number }) => Promise<void>;
 }
@@ -46,6 +46,10 @@ export function startXReactorCapture(
   let recorderPromise: Promise<SessionRecorder | null> | null = null;
   let finished = false;
   let durationMs = 0;
+  // The dedicated display is acquired inside crawl() AFTER the capture object
+  // exists, so it is injected via startRecorder(display) and reused for the
+  // dashboard row metadata.
+  let usedDisplay: XvfbDisplay | null = null;
 
   // Events are tagged with the session id itself — the UI queries logs with
   // pageId=sessionId, so concurrent sessions can never see each other's lines.
@@ -146,9 +150,7 @@ export function startXReactorCapture(
         userAgent: `XReactor: ${info.result.toUpperCase()} — ${seedUrl}`,
         proxy: "",
         // Dashboard wiring: video panel + per-session log filtering.
-        dimensions: display
-          ? { width: 1440, height: 900 }
-          : undefined,
+        dimensions: usedDisplay ? { width: 1440, height: 900 } : undefined,
         logPageId: sessionId,
         viewport: { width: 1440, height: 900 },
         recordingFile: videoFile ? `${sessionId}.mp4` : null,
@@ -159,13 +161,18 @@ export function startXReactorCapture(
   };
 
   // Start the recorder on THIS check's dedicated display (falls back to the
-  // shared :10 display when Xvfb is unavailable). Started lazily from the
-  // controller right after the display is acquired.
-  const startRecorder = (): void => {
+  // shared :10 display when Xvfb is unavailable). Called from crawl() right
+  // after the display is acquired and before the browser navigates.
+  const startRecorder = (display?: XvfbDisplay | null): void => {
     if (recorderPromise) return;
+    usedDisplay = display ?? null;
     try {
-      recorderPromise = display
-        ? startSessionRecorder(null, sessionId, { display: display.display, width: display.width, height: display.height })
+      recorderPromise = usedDisplay
+        ? startSessionRecorder(null, sessionId, {
+            display: usedDisplay.display,
+            width: usedDisplay.width,
+            height: usedDisplay.height,
+          })
         : startSessionRecorder(null, sessionId);
     } catch {
       recorderPromise = null;
