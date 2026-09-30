@@ -1,7 +1,6 @@
 import { FastifyReply } from "fastify";
 import { Page } from "patchright";
 import { CDPService } from "../../services/cdp/cdp.service.js";
-import { ShutdownReason } from "../../services/cdp/plugins/core/base-plugin.js";
 import { SessionService } from "../../services/session.service.js";
 import { ScrapeFormat } from "../../types/index.js";
 import { getErrors } from "../../utils/errors.js";
@@ -15,6 +14,8 @@ import {
   stripBase64Images,
 } from "../../utils/scrape/index.js";
 import { normalizeUrl } from "../../utils/url.js";
+import { startSessionRecorder } from "../../utils/scrape/page-recording.js";
+import { launchIsolatedScrapeBrowser } from "./isolated-scrape.js";
 import { PDFRequest, ScrapeRequest, ScreenshotRequest, SearchRequest } from "./actions.schema.js";
 import { DefuddleResponse } from "defuddle";
 import { buildHtmlLikeMetadataFromPdf, convertPdfWithMupdf } from "../../utils/scrape/pdfToHtml.js";
@@ -27,10 +28,18 @@ import { scrapePool } from "../../utils/scrape/scrape-pool.js";
 
 /**
  * Every action funnels through one lifecycle:
- *   ensureBrowser (headful patchright, all extensions auto-loaded)
- *   -> promote to a live session (starts the recording)
- *   -> do the work on the primary page
- *   -> release the session (stops + flushes the recording)
+ *   acquire an ISOLATED browser (private nodriver Chrome, own free CDP port,
+ *   own dedicated Xvfb display from the allocator, fresh clone of the
+ *   persistent-fingerprint profile)
+ *   -> start the ffmpeg recorder on exactly that display
+ *   -> do the work on the private page
+ *   -> stop the recorder, close the browser, free the display, push the
+ *      released session row
+ *
+ * NOTHING is shared between jobs — no shared browser, no shared screen, no
+ * serialization — so scrapes/screenshots/PDFs run truly concurrently (capped
+ * by scrapePool / SCRAPE_MAX_CONCURRENCY). The shared display :10 and the
+ * live-session browser are never touched by scrape traffic.
  */
 async function withScraperSession<T>(
   sessionService: SessionService,
@@ -48,69 +57,68 @@ async function withScraperSession<T>(
         await proxy.listen();
       }
 
-      // Fresh headful Chrome per job. startSession owns the full launch
-      // (config, timezone, extensions); a second ensureBrowser here would
-      // take the reuse path and close/recreate pages on a freshly launched
-      // browser, which can kill a --no-zygote renderer.
-      const session = await sessionService.startSession({
-        proxyUrl: proxy?.url ?? undefined,
+      const job = await launchIsolatedScrapeBrowser({
+        log,
+        sessionService,
+        instrumentationLogger: browserService.getInstrumentationLogger(),
         sessionExtensions: opts.sessionExtensions,
         profileId: opts.profileId,
+        proxyUrl: proxy?.url,
       });
 
-      const page = await browserService.getPrimaryPage();
-      const result = await fn(page);
+      let recordingFile: string | null = null;
+      try {
+        // Films exactly this job's dedicated display, so concurrent jobs each
+        // get a private, correctly-framed recording (no mixed frames).
+        const recorder = await startSessionRecorder(null, job.sessionId, {
+          ...(job.display
+            ? {
+                display: job.display.display,
+                width: job.display.width,
+                height: job.display.height,
+              }
+            : {}),
+        });
+        if (recorder) (job as any).__recorder = recorder;
 
-      // Release marks status=released with the real elapsed duration and
-      // flushes this session's video recording.
-      const released = await sessionService.endSession({ relaunchIdle: false });
-      log(`[scrape] session ${released.id} released after ${released.duration}ms`);
+        const result = await fn(job.page);
 
-      return result;
+        const activeRecorder = (job as any).__recorder as
+          | { stop: () => Promise<string | null> }
+          | undefined;
+        (job as any).__recorder = null;
+        if (activeRecorder?.stop) {
+          recordingFile = await activeRecorder.stop();
+        }
+
+        // The browser's real user agent lands in the released session row.
+        const userAgent = await job.page
+          .evaluate(() => navigator.userAgent)
+          .catch(() => undefined);
+
+        await job.finish({ userAgent, recordingFile });
+        log(`[scrape] session ${job.sessionId} released`);
+
+        return result;
+      } catch (err) {
+        // Belt-and-braces teardown: a thrown scrape must still stop the
+        // recorder, close the browser, free the display and release the row.
+        try {
+          const leaked = (job as any).__recorder as
+            | { stop: () => Promise<string | null> }
+            | undefined;
+          (job as any).__recorder = null;
+          if (leaked?.stop) recordingFile = await leaked.stop();
+        } catch {}
+        await job.finish({ recordingFile }).catch(() => {});
+        throw err;
+      }
     } finally {
       if (proxy) {
         await proxy.close(true).catch(() => {});
       }
-      // Belt-and-braces: if startSession threw, make sure nothing is left over.
-      // endSession is guarded so concurrent lifecycles never double-release;
-      // a full browser shutdown is only forced if ending the session fails.
-      try {
-        if (sessionService.activeSession.status === "live") {
-          await sessionService.endSession({ relaunchIdle: false });
-        }
-      } catch {
-        await browserService.shutdown(ShutdownReason.SESSION_END).catch(() => {});
-      }
     }
   });
-}
-
-async function startRecording(
-  sessionService: SessionService,
-  request: { log: { warn: (obj: any, msg: string) => void } },
-): Promise<void> {
-  try {
-    const { startSessionRecorder } = await import("../../utils/scrape/page-recording.js");
-    const sid = sessionService.activeSession?.id;
-    if (sid) {
-      const recorder = await startSessionRecorder(null, sid);
-      if (recorder) {
-        (sessionService.activeSession as any).__recorder = recorder;
-      }
-    }
-  } catch (err) {
-    request.log.warn({ err }, "startSessionRecorder failed");
-  }
-}
-
-async function stopRecording(sessionService: SessionService): Promise<void> {
-  try {
-    const recorder = (sessionService.activeSession as any).__recorder;
-    if (recorder) {
-      (sessionService.activeSession as any).__recorder = null;
-      await recorder.stop();
-    }
-  } catch {}
 }
 
 export const handleScrape = async (
@@ -131,8 +139,6 @@ export const handleScrape = async (
       (msg) => request.log.info(msg),
       { proxyUrl, profileId },
       async (page) => {
-        await startRecording(sessionService, request as any);
-
         let normalizedUrl: string | null = null;
         if (url) {
           normalizedUrl = normalizeUrl(url);
@@ -396,7 +402,6 @@ export const handleScrape = async (
           scrapeResponse.content.html = htmlContent;
         }
 
-        await stopRecording(sessionService);
         times.totalInstanceTime = Date.now() - startTime;
 
         return scrapeResponse;
@@ -520,8 +525,6 @@ export const handleScreenshot = async (
       (msg) => request.log.info(msg),
       { proxyUrl },
       async (page) => {
-        await startRecording(sessionService, request as any);
-
         if (url) {
           const normalizedUrl = normalizeUrl(url);
           if (!normalizedUrl) {
@@ -536,7 +539,6 @@ export const handleScreenshot = async (
         const screenshot = await page.screenshot({ fullPage, type: "jpeg", quality: 100 } as any);
         times.totalInstanceTime = Date.now() - startTime;
 
-        await stopRecording(sessionService);
         return screenshot;
       },
     );
