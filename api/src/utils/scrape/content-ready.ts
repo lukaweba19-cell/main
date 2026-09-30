@@ -226,11 +226,16 @@ export function installReadinessPredicate() {
 
     var interactive =
       document.readyState === "interactive" || document.readyState === "complete";
+    // Presentable content = ANY real signal: body text (even a short t.me
+    // profile), a meaningful title, or structural tags. The old >=200 chars
+    // / >=5 tags bar never passed for small pages (t.me = 36 chars / 4 tags)
+    // so the predicate never fired for them.
     var hasContent = false;
     if (document.body) {
-      hasContent =
-        body.length >= 200 ||
-        document.body.querySelectorAll("a, p, h1, h2, h3, li, td, th, article, section").length >= 5;
+      var structural = document.body.querySelectorAll(
+        "a, p, h1, h2, h3, li, td, th, article, section",
+      ).length;
+      hasContent = body.length > 0 || structural >= 3 || (document.title || "").length > 0;
     }
 
     var sig =
@@ -246,7 +251,7 @@ export function installReadinessPredicate() {
       sig: sig,
       title: document.title || "",
       contentChars: body.length,
-      tagCount: hasContent ? 1 : 0,
+      tagCount: 0,
       url: window.location.href,
       readyState: document.readyState,
     };
