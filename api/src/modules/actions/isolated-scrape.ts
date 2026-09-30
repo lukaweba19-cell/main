@@ -153,6 +153,18 @@ export async function launchIsolatedScrapeBrowser(opts: {
     throw new Error(launch.error || "nodriver launch failed without a CDP endpoint");
   }
   const pid = launch.pid ?? null;
+
+  // Dashboard visibility: register the job as a LIVE session the moment its
+  // private browser is up. /v1/sessions and the session view then show it
+  // while it runs (the old shared-browser path had this; isolated jobs only
+  // used to surface a released row after finishing).
+  opts.sessionService.addRunningScrapeJob({
+    id: sessionId,
+    createdAt,
+    cdpPort: launch.port ?? 0,
+    dimensions: { width: windowSize[0], height: windowSize[1] },
+    logPageId: sessionId,
+  });
   opts.log(
     `[scrape] nodriver launched session=${sessionId} pid=${pid} port=${launch.port}` +
       ` extensions=${(launch.extensionsLoaded ?? []).length} loaded / ${(launch.extensionsFailed ?? []).length} failed`,
@@ -162,6 +174,7 @@ export async function launchIsolatedScrapeBrowser(opts: {
   try {
     browser = await chromium.connectOverCDP(launch.webSocketDebuggerUrl);
   } catch (err) {
+    opts.sessionService.removeRunningScrapeJob(sessionId);
     if (pid != null) await nodriverClose(pid).catch(() => {});
     rmProfile(profileDir);
     display?.stop();
@@ -170,6 +183,7 @@ export async function launchIsolatedScrapeBrowser(opts: {
 
   const context = browser.contexts()[0];
   if (!context) {
+    opts.sessionService.removeRunningScrapeJob(sessionId);
     await browser.close().catch(() => {});
     if (pid != null) await nodriverClose(pid).catch(() => {});
     rmProfile(profileDir);
@@ -201,6 +215,9 @@ export async function launchIsolatedScrapeBrowser(opts: {
   }): Promise<void> => {
     if (finished) return;
     finished = true;
+
+    // First order of business: it is no longer a live row.
+    opts.sessionService.removeRunningScrapeJob(sessionId);
 
     try {
       await browser.close();

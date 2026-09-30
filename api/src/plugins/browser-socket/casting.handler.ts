@@ -43,6 +43,13 @@ export async function handleCastSession(
   const requestedPageId = params?.pageId || queryParams.get("pageId") || null;
   const requestedPageIndex = params?.pageIndex || queryParams.get("pageIndex") || null;
 
+  // Isolated scrape jobs: ?sessionId=<id> means "cast THAT job's private
+  // browser", not the shared session browser. Each job runs nodriver on its
+  // own free CDP port, so attach by port (falling back to the shared one).
+  const jobId = queryParams.get("sessionId") || null;
+  const job = jobId ? sessionService.getRunningScrapeJob(jobId) : undefined;
+  const cdpPort = job ? job.cdpPort || getSessionCdpPort() : getSessionCdpPort();
+
   const tabDiscoveryMode =
     queryParams.get("tabInfo") === "true" || (!requestedPageId && !requestedPageIndex);
 
@@ -167,10 +174,11 @@ export async function handleCastSession(
 
     try {
       // Attach to the running browser over its CDP websocket (patchright).
-      // nodriver picks a fresh CDP port per launch — use the live one.
+      // nodriver picks a fresh CDP port per launch — use the live one. For an
+      // isolated scrape job, that is the job's own port, not the shared one.
       const { chromium } = await import("patchright");
       const browser = await chromium.connectOverCDP(
-        `http://127.0.0.1:${getSessionCdpPort() || env.CDP_REDIRECT_PORT}`,
+        `http://127.0.0.1:${cdpPort || env.CDP_REDIRECT_PORT}`,
       );
       const contexts = browser.contexts();
       context = contexts[0] ?? (await browser.newContext());

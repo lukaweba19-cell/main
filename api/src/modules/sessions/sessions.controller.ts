@@ -109,6 +109,13 @@ export const handleGetSessionDetails = async (
     });
   }
 
+  // A running isolated scrape job reports itself as a live session.
+  const job = server.sessionService.getRunningScrapeJob(sessionId);
+  if (job) {
+    const details = server.sessionService.toLiveSessionDetails(job);
+    return reply.send({ ...details, kind: "scrape" as const });
+  }
+
   const past = server.sessionService.pastSessions.find((s) => s.id === sessionId);
   if (past) {
     return reply.send(past);
@@ -134,6 +141,13 @@ export const handleGetSessions = async (
       duration: new Date().getTime() - new Date(active.createdAt).getTime(),
     });
   }
+  // Running isolated scrape jobs are live sessions too — they appear in the
+  // list while they run and flip to their released row once finished.
+  sessions.push(
+    ...server.sessionService.getRunningScrapeJobs().map((job) =>
+      server.sessionService.toLiveSessionDetails(job),
+    ),
+  );
   sessions.push(...server.sessionService.pastSessions);
   return reply.send({ sessions });
 };
@@ -143,16 +157,29 @@ export const handleGetSessionStream = async (
   request: SessionStreamRequest,
   reply: FastifyReply,
 ) => {
-  const { showControls, theme, interactive, pageId, pageIndex } = request.query;
+  const { showControls, theme, interactive, pageId, pageIndex, sessionId } = request.query;
 
   const singlePageMode = !!(pageId || pageIndex);
 
+  // A running isolated scrape job is watched through its OWN private browser
+  // (cast resolves it by session id). Its dims differ from the shared
+  // session's, so size the player for the job when one is requested.
+  const job = sessionId ? server.sessionService.getRunningScrapeJob(sessionId) : undefined;
+
   // Construct WebSocket URL with page parameters if present
   let wsUrl = getUrl("v1/sessions/cast", "ws");
+  const wsParams: string[] = [];
+  if (job) {
+    // Tell the cast handler which browser to attach to.
+    wsParams.push(`sessionId=${encodeURIComponent(sessionId!)}`);
+  }
   if (pageId) {
-    wsUrl += `?pageId=${encodeURIComponent(pageId)}`;
+    wsParams.push(`pageId=${encodeURIComponent(pageId)}`);
   } else if (pageIndex) {
-    wsUrl += `?pageIndex=${encodeURIComponent(pageIndex)}`;
+    wsParams.push(`pageIndex=${encodeURIComponent(pageIndex)}`);
+  }
+  if (wsParams.length) {
+    wsUrl += `?${wsParams.join("&")}`;
   }
 
   return reply.view("live-session-streamer.ejs", {
@@ -160,7 +187,7 @@ export const handleGetSessionStream = async (
     showControls,
     theme,
     interactive,
-    dimensions: server.sessionService.activeSession.dimensions,
+    dimensions: job?.dimensions || server.sessionService.activeSession.dimensions,
     singlePageMode,
   });
 };

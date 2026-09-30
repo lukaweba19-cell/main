@@ -46,6 +46,51 @@ function createService({ withProxy = false } = {}) {
   return { service, cdpService, proxy };
 }
 
+describe("SessionService running scrape jobs (live dashboard rows)", () => {
+  it("registers a running job as a live row and removes it on finish", () => {
+    const { service } = createService();
+
+    service.addRunningScrapeJob({
+      id: "job-1",
+      createdAt: new Date().toISOString(),
+      cdpPort: 9333,
+      dimensions: { width: 1440, height: 900 },
+      logPageId: "job-1",
+    });
+
+    const rows = service.getRunningScrapeJobs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].cdpPort).toBe(9333);
+
+    const live = service.toLiveSessionDetails(rows[0]);
+    expect(live.status).toBe("live");
+    expect(live.debugUrl).toContain("/v1/sessions/debug");
+    expect(live.kind).toBe("scrape");
+    expect(live.logPageId).toBe("job-1");
+
+    service.removeRunningScrapeJob("job-1");
+    expect(service.getRunningScrapeJobs()).toHaveLength(0);
+  });
+
+  it("lists newest jobs first and finds a job by id", () => {
+    const { service } = createService();
+    for (const id of ["job-a", "job-b", "job-c"]) {
+      service.addRunningScrapeJob({
+        id,
+        createdAt: new Date().toISOString(),
+        cdpPort: 0,
+      });
+    }
+    expect(service.getRunningScrapeJobs().map((j) => j.id)).toEqual([
+      "job-c",
+      "job-b",
+      "job-a",
+    ]);
+    expect(service.getRunningScrapeJob("job-b")?.id).toBe("job-b");
+    expect(service.getRunningScrapeJob("missing")).toBeUndefined();
+  });
+});
+
 describe("SessionService.endSession proxy accounting", () => {
   it("reports the counters the proxy settles on close", async () => {
     const { service, proxy } = createService({ withProxy: true });

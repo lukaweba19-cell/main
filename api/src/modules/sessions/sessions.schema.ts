@@ -153,6 +153,9 @@ const SessionDetails = z.object({
     .object({ width: z.number(), height: z.number() })
     .optional()
     .describe("Recorded browser viewport"),
+  // Dashboard hint: a live row produced by an isolated scrape job (not the
+  // shared session browser) — the UI must not offer Release for it.
+  kind: z.enum(["scrape"]).optional().describe("Row origin: scrape = isolated scrape job"),
 });
 
 const ReleaseSession = SessionDetails.merge(
@@ -177,6 +180,8 @@ const SessionStreamQuery = z.object({
   interactive: z.boolean().optional().default(true).describe("Make the browser iframe interactive"),
   pageId: z.string().optional().describe("Page ID to connect to"),
   pageIndex: z.string().optional().describe("Page index (or tab index) to connect to"),
+  // Isolated scrape jobs: watch THAT job's private browser, not the shared one.
+  sessionId: z.string().optional().describe("Isolated scrape job session id to view"),
 });
 
 const SessionLiveDetailsResponse = z.object({

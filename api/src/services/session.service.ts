@@ -48,6 +48,22 @@ export type ProxyFactory = (
   options?: OptimizeBandwidthOptions,
 ) => Promise<IProxyServer> | IProxyServer;
 
+/**
+ * A scrape/screenshot/PDF job running in its OWN isolated browser (see
+ * isolated-scrape.ts). It is registered the moment its private browser is up
+ * and removed when the job finishes, so the dashboard shows it as a live
+ * session while it runs — the same visibility the old shared-browser scrape
+ * path had, without sharing any browser/display state.
+ */
+export interface RunningScrapeJob {
+  id: string;
+  createdAt: string;
+  /** Free-form CDP port of this job's private browser (0 = unknown). */
+  cdpPort: number;
+  dimensions?: { width: number; height: number };
+  logPageId?: string;
+}
+
 export class SessionService {
   private logger: FastifyBaseLogger;
   private cdpService: CDPService;
@@ -55,6 +71,9 @@ export class SessionService {
 
   public pastSessions: Session[] = [];
   public activeSession: Session;
+
+  /** Isolated scrape jobs currently running (registered on launch). */
+  private runningJobs = new Map<string, RunningScrapeJob>();
 
   constructor(config: { cdpService: CDPService; logger: FastifyBaseLogger }) {
     this.cdpService = config.cdpService;
@@ -334,5 +353,51 @@ export class SessionService {
 
   public setProxyFactory(factory: ProxyFactory) {
     this.proxyFactory = factory;
+  }
+
+  /**
+   * Register a running isolated scrape job so it shows up in the sessions
+   * list/details/live view while it runs. Called right after the job's
+   * private browser is launched; removeRunningScrapeJob deletes it.
+   */
+  public addRunningScrapeJob(job: RunningScrapeJob): void {
+    this.runningJobs.set(job.id, job);
+  }
+
+  public removeRunningScrapeJob(id: string): void {
+    this.runningJobs.delete(id);
+  }
+
+  public getRunningScrapeJob(id: string): RunningScrapeJob | undefined {
+    return this.runningJobs.get(id);
+  }
+
+  /** All running jobs, newest first (matches how the dashboard lists sessions). */
+  public getRunningScrapeJobs(): RunningScrapeJob[] {
+    return Array.from(this.runningJobs.values()).reverse();
+  }
+
+  /** Shape a running job as a live SessionDetails row for the dashboard. */
+  public toLiveSessionDetails(job: RunningScrapeJob) {
+    return {
+      id: job.id,
+      createdAt: job.createdAt,
+      status: "live" as const,
+      duration: Date.now() - new Date(job.createdAt).getTime(),
+      eventCount: 0,
+      timeout: 0,
+      creditsUsed: 0,
+      proxyTxBytes: 0,
+      proxyRxBytes: 0,
+      websocketUrl: getBaseUrl("ws"),
+      debugUrl: getUrl("v1/sessions/debug"),
+      debuggerUrl: getUrl("v1/devtools/inspector.html"),
+      sessionViewerUrl: getBaseUrl(),
+      dimensions: job.dimensions,
+      userAgent: "",
+      proxy: "",
+      logPageId: job.logPageId,
+      kind: "scrape" as const,
+    };
   }
 }

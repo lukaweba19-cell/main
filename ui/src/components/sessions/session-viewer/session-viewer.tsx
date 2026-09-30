@@ -177,6 +177,14 @@ export function SessionViewer({ id }: SessionViewerProps) {
     );
 
   if (isLive) {
+    // Isolated scrape jobs cast THEIR OWN private browser: ask the streamer
+    // for that job (?sessionId=...) — cast then attaches to the job's CDP
+    // port instead of the shared session browser.
+    const isScrapeJob = (session as any).kind === "scrape";
+    const streamBase = session?.debugUrl || `${env.VITE_API_URL}/v1/sessions/debug`;
+    const streamSrc = `${streamBase}${
+      streamBase.includes("?") ? "&" : "?"
+    }${isScrapeJob ? `sessionId=${encodeURIComponent(session.id)}&` : ""}clipboardBridge=true`;
     return (
       <div
         ref={containerRef}
@@ -186,9 +194,7 @@ export function SessionViewer({ id }: SessionViewerProps) {
       >
         <iframe
           ref={iframeRef}
-          src={`${session?.debugUrl}${
-            session?.debugUrl?.includes("?") ? "&" : "?"
-          }clipboardBridge=true`}
+          src={streamSrc}
           sandbox="allow-same-origin allow-scripts allow-clipboard-write allow-clipboard-read"
           className="w-full aspect-[16/10]"
           allow="clipboard-read; clipboard-write"

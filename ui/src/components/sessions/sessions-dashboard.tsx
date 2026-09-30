@@ -200,7 +200,9 @@ export function SessionsDashboard() {
                       >
                         <Link to={`/sessions/${session.id}`}>Open</Link>
                       </Button>
-                      {session.status === "live" && (
+                      {/* Live SCRAPE JOBS are managed by their HTTP request —
+                          releasing would tear down the shared session instead. */}
+                      {session.status === "live" && (session as any).kind !== "scrape" && (
                         <Button
                           variant="outline"
                           size="sm"

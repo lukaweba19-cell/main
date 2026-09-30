@@ -539,13 +539,18 @@
               // For single-page mode, the URL already includes the pageId
               if (singlePageMode) return baseWsUrl;
 
+              // Keep params the server already set (e.g. sessionId=<job> for
+              // isolated scrape jobs) and add the cast-specific ones.
+              const hasQuery = baseWsUrl.includes('?');
+              const joiner = hasQuery ? '&' : '?';
+
               // For tab discovery, add tabInfo parameter
               if (pageId === 'tab-discovery') {
-                  return `${baseWsUrl}?tabInfo=true`;
+                  return `${baseWsUrl}${joiner}tabInfo=true`;
               }
 
               // Regular tab connection
-              return `${baseWsUrl}?pageId=${encodeURIComponent(pageId)}`;
+              return `${baseWsUrl}${joiner}pageId=${encodeURIComponent(pageId)}`;
           }
 
           // Function to establish WebSocket connection for a tab
