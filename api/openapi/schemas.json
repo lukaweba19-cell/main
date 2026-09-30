@@ -43,6 +43,21 @@
           },
           "logUrl": {
             "type": "string"
+          },
+          "profileId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "description": "Uploaded profile (/v1/profiles) id to run this scrape with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used."
           }
         },
         "additionalProperties": false
@@ -568,6 +583,21 @@
             "type": "string",
             "description": "User data directory path to use for the session"
           },
+          "profileId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "description": "Uploaded profile (/v1/profiles) id to run this session with. Empty/null/omitted: the durable default profile (persistent fingerprint) is used."
+          },
           "timezone": {
             "type": "string",
             "description": "Timezone to use for the session"
@@ -759,6 +789,27 @@
             },
             "additionalProperties": false,
             "description": "Device configuration for the session"
+          },
+          "logPageId": {
+            "type": "string",
+            "description": "Instrumentation pageId for this session's log events"
+          },
+          "viewport": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "width",
+              "height"
+            ],
+            "additionalProperties": false,
+            "description": "Recorded browser viewport"
           }
         },
         "required": [
@@ -888,6 +939,27 @@
                   },
                   "additionalProperties": false,
                   "description": "Device configuration for the session"
+                },
+                "logPageId": {
+                  "type": "string",
+                  "description": "Instrumentation pageId for this session's log events"
+                },
+                "viewport": {
+                  "type": "object",
+                  "properties": {
+                    "width": {
+                      "type": "number"
+                    },
+                    "height": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Recorded browser viewport"
                 }
               },
               "required": [
@@ -1256,6 +1328,27 @@
             },
             "additionalProperties": false,
             "description": "Device configuration for the session"
+          },
+          "logPageId": {
+            "type": "string",
+            "description": "Instrumentation pageId for this session's log events"
+          },
+          "viewport": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "width",
+              "height"
+            ],
+            "additionalProperties": false,
+            "description": "Recorded browser viewport"
           },
           "success": {
             "type": "boolean",
@@ -1810,10 +1903,6 @@
               "type": "string"
             }
           },
-          "fingerprint": {
-            "type": "object",
-            "additionalProperties": {}
-          },
           "credentialsConfig": {
             "type": "object",
             "additionalProperties": {}
@@ -1827,9 +1916,6 @@
                 "type": "string"
               }
             ]
-          },
-          "userAgent": {
-            "type": "string"
           },
           "proxyUrl": {
             "type": "string"
@@ -1904,10 +1990,6 @@
                     "type": "string"
                   }
                 },
-                "fingerprint": {
-                  "type": "object",
-                  "additionalProperties": {}
-                },
                 "credentialsConfig": {
                   "type": "object",
                   "additionalProperties": {}
@@ -1921,9 +2003,6 @@
                       "type": "string"
                     }
                   ]
-                },
-                "userAgent": {
-                  "type": "string"
                 },
                 "proxyUrl": {
                   "type": "string"
@@ -1976,12 +2055,801 @@
           "useProxy": {
             "type": "string",
             "description": "JSON-encoded proxy configuration"
-          },
-          "userAgent": {
-            "type": "string"
           }
         },
         "additionalProperties": false
+      },
+      "XReactorCheckRequest": {
+        "title": "XReactorCheckRequest",
+        "type": "object",
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              }
+            ],
+            "description": "Page URL to check — either a single string or an array of URLs for batch checks"
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Alternative to `url`: an array of page URLs to check"
+          }
+        },
+        "additionalProperties": false
+      },
+      "XReactorVerdict": {
+        "title": "XReactorVerdict",
+        "type": "object",
+        "properties": {
+          "variant": {
+            "type": "string"
+          },
+          "excerpt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "variant",
+          "excerpt"
+        ],
+        "additionalProperties": false
+      },
+      "XReactorPageVerdict": {
+        "title": "XReactorPageVerdict",
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "finalUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "skipped"
+            ]
+          },
+          "cloudFound": {
+            "type": "boolean"
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "variant": {
+                  "type": "string"
+                },
+                "excerpt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "variant",
+                "excerpt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "markdownChars": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "followedFrom": {
+            "type": "string",
+            "nullable": true
+          },
+          "navMs": {
+            "type": "integer"
+          },
+          "readyMs": {
+            "type": "integer"
+          },
+          "extractMs": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "url",
+          "finalUrl",
+          "status",
+          "cloudFound",
+          "matches",
+          "markdownChars",
+          "followedFrom"
+        ],
+        "additionalProperties": false
+      },
+      "XReactorSingleResult": {
+        "title": "XReactorSingleResult",
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string",
+            "enum": [
+              "allowed",
+              "disallowed"
+            ]
+          },
+          "seedUrl": {
+            "type": "string"
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "finalUrl": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "error",
+                    "skipped"
+                  ]
+                },
+                "cloudFound": {
+                  "type": "boolean"
+                },
+                "matches": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "variant": {
+                        "type": "string"
+                      },
+                      "excerpt": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "variant",
+                      "excerpt"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "markdownChars": {
+                  "type": "integer"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "followedFrom": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "navMs": {
+                  "type": "integer"
+                },
+                "readyMs": {
+                  "type": "integer"
+                },
+                "extractMs": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "url",
+                "finalUrl",
+                "status",
+                "cloudFound",
+                "matches",
+                "markdownChars",
+                "followedFrom"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "links": {
+            "type": "object",
+            "properties": {
+              "found": {
+                "type": "integer"
+              },
+              "followed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "skippedAds": {
+                "type": "integer"
+              },
+              "skippedBinary": {
+                "type": "integer"
+              },
+              "skippedOther": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "found",
+              "followed",
+              "skippedAds",
+              "skippedBinary",
+              "skippedOther"
+            ],
+            "additionalProperties": false
+          },
+          "timings": {
+            "type": "object",
+            "properties": {
+              "totalMs": {
+                "type": "integer"
+              },
+              "launchMs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "totalMs"
+            ],
+            "additionalProperties": false
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "seedUrl",
+          "pages",
+          "links",
+          "timings"
+        ],
+        "additionalProperties": false
+      },
+      "XReactorMultiResult": {
+        "title": "XReactorMultiResult",
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "allowed",
+                    "disallowed"
+                  ]
+                },
+                "seedUrl": {
+                  "type": "string"
+                },
+                "pages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      },
+                      "finalUrl": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "ok",
+                          "error",
+                          "skipped"
+                        ]
+                      },
+                      "cloudFound": {
+                        "type": "boolean"
+                      },
+                      "matches": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "variant": {
+                              "type": "string"
+                            },
+                            "excerpt": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "variant",
+                            "excerpt"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "markdownChars": {
+                        "type": "integer"
+                      },
+                      "error": {
+                        "type": "string"
+                      },
+                      "followedFrom": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "navMs": {
+                        "type": "integer"
+                      },
+                      "readyMs": {
+                        "type": "integer"
+                      },
+                      "extractMs": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "finalUrl",
+                      "status",
+                      "cloudFound",
+                      "matches",
+                      "markdownChars",
+                      "followedFrom"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "links": {
+                  "type": "object",
+                  "properties": {
+                    "found": {
+                      "type": "integer"
+                    },
+                    "followed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "skippedAds": {
+                      "type": "integer"
+                    },
+                    "skippedBinary": {
+                      "type": "integer"
+                    },
+                    "skippedOther": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "found",
+                    "followed",
+                    "skippedAds",
+                    "skippedBinary",
+                    "skippedOther"
+                  ],
+                  "additionalProperties": false
+                },
+                "timings": {
+                  "type": "object",
+                  "properties": {
+                    "totalMs": {
+                      "type": "integer"
+                    },
+                    "launchMs": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "totalMs"
+                  ],
+                  "additionalProperties": false
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result",
+                "seedUrl",
+                "pages",
+                "links",
+                "timings"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "allowed": {
+                "type": "integer"
+              },
+              "disallowed": {
+                "type": "integer"
+              },
+              "pagesErrored": {
+                "type": "integer"
+              },
+              "totalMs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total",
+              "allowed",
+              "disallowed",
+              "pagesErrored",
+              "totalMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "results",
+          "summary"
+        ],
+        "additionalProperties": false
+      },
+      "XReactorResponse": {
+        "title": "XReactorResponse",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "string",
+                "enum": [
+                  "allowed",
+                  "disallowed"
+                ]
+              },
+              "seedUrl": {
+                "type": "string"
+              },
+              "pages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    },
+                    "finalUrl": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok",
+                        "error",
+                        "skipped"
+                      ]
+                    },
+                    "cloudFound": {
+                      "type": "boolean"
+                    },
+                    "matches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "variant": {
+                            "type": "string"
+                          },
+                          "excerpt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "variant",
+                          "excerpt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "markdownChars": {
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "followedFrom": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "navMs": {
+                      "type": "integer"
+                    },
+                    "readyMs": {
+                      "type": "integer"
+                    },
+                    "extractMs": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "finalUrl",
+                    "status",
+                    "cloudFound",
+                    "matches",
+                    "markdownChars",
+                    "followedFrom"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "found": {
+                    "type": "integer"
+                  },
+                  "followed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "skippedAds": {
+                    "type": "integer"
+                  },
+                  "skippedBinary": {
+                    "type": "integer"
+                  },
+                  "skippedOther": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "found",
+                  "followed",
+                  "skippedAds",
+                  "skippedBinary",
+                  "skippedOther"
+                ],
+                "additionalProperties": false
+              },
+              "timings": {
+                "type": "object",
+                "properties": {
+                  "totalMs": {
+                    "type": "integer"
+                  },
+                  "launchMs": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "totalMs"
+                ],
+                "additionalProperties": false
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "seedUrl",
+              "pages",
+              "links",
+              "timings"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "results": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string",
+                      "enum": [
+                        "allowed",
+                        "disallowed"
+                      ]
+                    },
+                    "seedUrl": {
+                      "type": "string"
+                    },
+                    "pages": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "url": {
+                            "type": "string"
+                          },
+                          "finalUrl": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "ok",
+                              "error",
+                              "skipped"
+                            ]
+                          },
+                          "cloudFound": {
+                            "type": "boolean"
+                          },
+                          "matches": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "variant": {
+                                  "type": "string"
+                                },
+                                "excerpt": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "variant",
+                                "excerpt"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "markdownChars": {
+                            "type": "integer"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "followedFrom": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "navMs": {
+                            "type": "integer"
+                          },
+                          "readyMs": {
+                            "type": "integer"
+                          },
+                          "extractMs": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "url",
+                          "finalUrl",
+                          "status",
+                          "cloudFound",
+                          "matches",
+                          "markdownChars",
+                          "followedFrom"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "links": {
+                      "type": "object",
+                      "properties": {
+                        "found": {
+                          "type": "integer"
+                        },
+                        "followed": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "skippedAds": {
+                          "type": "integer"
+                        },
+                        "skippedBinary": {
+                          "type": "integer"
+                        },
+                        "skippedOther": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "found",
+                        "followed",
+                        "skippedAds",
+                        "skippedBinary",
+                        "skippedOther"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "timings": {
+                      "type": "object",
+                      "properties": {
+                        "totalMs": {
+                          "type": "integer"
+                        },
+                        "launchMs": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "totalMs"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "result",
+                    "seedUrl",
+                    "pages",
+                    "links",
+                    "timings"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer"
+                  },
+                  "allowed": {
+                    "type": "integer"
+                  },
+                  "disallowed": {
+                    "type": "integer"
+                  },
+                  "pagesErrored": {
+                    "type": "integer"
+                  },
+                  "totalMs": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "total",
+                  "allowed",
+                  "disallowed",
+                  "pagesErrored",
+                  "totalMs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "results",
+              "summary"
+            ],
+            "additionalProperties": false
+          }
+        ]
       }
     }
   },
@@ -3091,6 +3959,82 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_profile",
+        "summary": "Delete a profile",
+        "tags": [
+          "Profiles"
+        ],
+        "description": "Delete a profile and its stored userDataDir archive",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "query",
+            "name": "projectId",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/xreactor": {
+      "post": {
+        "operationId": "xreactor_check",
+        "summary": "Cloud-mention compliance check for a URL",
+        "tags": [
+          "XReactor"
+        ],
+        "description": "Scrape a URL (plus up to 3 linked pages), detect any mention of 'cloud' in any spelling, and return allowed or disallowed",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/XReactorCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/XReactorResponse"
                 }
               }
             }

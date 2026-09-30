@@ -7,17 +7,21 @@ import type { Page } from "patchright";
  * moment the requested content is really there:
  *
  *   1. Challenge interstitials (Cloudflare & friends) are detected and waited
- *      out while the loaded extensions solve them. The check is title/body
+ *      out while the loaded extensions solve them. The check is title/path
  *      based — Cloudflare's challenge <script> tags stay in the DOM after the
  *      challenge clears, so they must never count as "still challenged".
- *   2. Once unchallenged, we wait for the page to go quiet: document ready,
- *      no in-flight requests (network idle) and a stable DOM (no mutation for
- *      a settle window). The first poll that satisfies all three returns —
- *      no fixed timeout burn.
- *   3. Simple, small pages (example.com) qualify immediately, so they finish
- *      in seconds instead of waiting out the whole timeout.
+ *   2. Once unchallenged, we wait for the page to be PRESENTABLE (rendered
+ *      content) and to STAY presentable for a short settle window. Settle is
+ *      time-based (wall-clock), NOT mutation-gated: animated pages (hero
+ *      carousels, live tickers, tracker churn) mutate forever, and a
+ *      "DOM unchanged for N frames" gate would never fire — that was the bug
+ *      that burned 45s ceilings on fully rendered pages.
+ *   3. The predicate is STATELESS PER CALL: every invocation owns its own
+ *      closure state. No shared window state, no cross-call observers, no
+ *      pagehide dead-loops. Simple pages resolve on the first poll.
  */
 
+/** Challenge titles — strong interstitial signals only. */
 const CHALLENGE_TITLES = [
   "just a moment",
   "attention required",
@@ -26,6 +30,7 @@ const CHALLENGE_TITLES = [
   "one more step",
 ];
 
+/** Challenge body phrases (legacy snapshot support). */
 const CHALLENGE_BODY_PHRASES = [
   "performing security verification",
   "checking your browser before accessing",
@@ -42,14 +47,14 @@ const CHALLENGE_MAX_CONTENT_CHARS = 300;
 const MIN_CONTENT_CHARS = 200;
 const MIN_TAG_COUNT = 5;
 
-/** No request may be in flight during this window to call the page quiet. */
-const QUIET_WINDOW_MS = 1200;
-/** DOM must be unchanged for this long before we accept it as settled. */
-const DOM_SETTLE_MS = 1200;
-/** How long a challenge may take to clear before we give up waiting. */
+/** The page must STAY presentable for this long before we accept it. */
+export const PRESENTABLE_SETTLE_MS = 800;
+/** How long a challenge may take to clear before we give up (failure ceiling). */
 const DEFAULT_TIMEOUT_MS = 60_000;
-/** Poll cadence while waiting for readiness. */
-const POLL_MS = 500;
+/** Outer re-poll cadence while waiting for readiness. */
+const POLL_MS = 250;
+/** Max wall-clock time the in-page predicate waits before returning a status. */
+const IN_PAGE_MAX_WAIT_MS = 4_000;
 
 function isChallengeTitle(title: string): boolean {
   const t = (title || "").toLowerCase();
@@ -183,17 +188,22 @@ export interface WaitForContentResult {
 }
 
 /**
- * In-page predicate — serialized and executed in the browser. Installs a
- * MutationObserver + rAF loop the FIRST call and resolves as soon as the
- * page is PRESENTABLE:
- *   - not a challenge interstitial (strong signals only: title/shell-URL;
- *     cookie banners and generic phrases never count)
- *   - document interactive/complete AND real content (text or structure)
- *   - DOM unchanged across one animation frame while presentable
+ * In-page predicate — serialized and executed in the browser.
  *
- * Instant for a normal page (first rAF after content renders — typically
- * well under 1s after domcontentloaded); waits exactly as long as a real
- * challenge takes (2s or 60s — no artificial floor or window).
+ * STATELESS: all state lives in this invocation's closure. Polls its own
+ * snapshot on a 100ms cadence (no rAF dependency — rAF throttles/stalls in
+ * occluded or busy tabs) and resolves the moment the page has been
+ * CONTINUOUSLY presentable for PRESENTABLE_SETTLE_MS (wall-clock, so DOM
+ * churn from animations cannot reset it — presence, not change, is measured).
+ *
+ * Presentable = document interactive/complete AND (body text OR >=3
+ * structural tags) AND not a challenge. A non-empty <title> alone NEVER
+ * counts as content: t.me paints the title while the body is still blank,
+ * and counting it released sessions on white pages.
+ *
+ * Returns when presentable-and-settled, or after IN_PAGE_MAX_WAIT_MS with
+ * status:"waiting" — the outer loop then simply re-invokes us (stateless, so
+ * re-invocation is free) or runs a final snapshot.
  */
 export function installReadinessPredicate() {
   var CHALLENGE_TITLES = [
@@ -203,16 +213,21 @@ export function installReadinessPredicate() {
     "checking your browser",
     "one more step",
   ];
+  var SETTLE_MS = 800;
+  var MAX_WAIT_MS = 4000;
 
   var w = window as any;
-  var state = w.__steelReadiness;
-  if (!state) {
-    state = w.__steelReadiness = { observers: 0, lastSig: "", stableFrames: 0 };
+  if (w.__steelReadiness) {
+    try {
+      delete w.__steelReadiness;
+    } catch {
+      /* leave it — nothing reads it any more */
+    }
   }
 
   function snapshotNow() {
     var title = (document.title || "").toLowerCase();
-    var body = (document.body ? document.body.innerText : "").trim();
+    var body = document.body ? document.body.innerText : "";
     var path = (window.location.pathname || "").toLowerCase();
     var titleChallenged = CHALLENGE_TITLES.some(function (s) {
       return title.indexOf(s) !== -1;
@@ -226,31 +241,23 @@ export function installReadinessPredicate() {
 
     var interactive =
       document.readyState === "interactive" || document.readyState === "complete";
-    // Presentable content = ANY real signal: body text (even a short t.me
-    // profile), a meaningful title, or structural tags. The old >=200 chars
-    // / >=5 tags bar never passed for small pages (t.me = 36 chars / 4 tags)
-    // so the predicate never fired for them.
+
+    // Presentable content = real rendered material: body text (even a short
+    // t.me profile) or structural tags. A non-empty <title> alone never
+    // counts — t.me paints the title while the body is still white.
     var hasContent = false;
     if (document.body) {
       var structural = document.body.querySelectorAll(
         "a, p, h1, h2, h3, li, td, th, article, section",
       ).length;
-      hasContent = body.length > 0 || structural >= 3 || (document.title || "").length > 0;
+      hasContent = body.length > 0 || structural >= 3;
     }
 
-    var sig =
-      (document.title || "") +
-      "|" +
-      body.length +
-      "|" +
-      (document.body ? document.body.querySelectorAll("*").length : 0);
-
     return {
-      presentable: interactive && hasContent && !challenge,
+      presentable: !!(interactive && hasContent && !challenge),
       challenge: challenge,
-      sig: sig,
       title: document.title || "",
-      contentChars: body.length,
+      contentChars: body.trim().length,
       tagCount: 0,
       url: window.location.href,
       readyState: document.readyState,
@@ -259,62 +266,62 @@ export function installReadinessPredicate() {
 
   return new Promise(function (resolve) {
     var settled = false;
-    function finish(snap) {
+    var start = Date.now();
+    var presentableSince = -1; // timestamp when the page FIRST became presentable
+
+    function finish(snap: any) {
       if (settled) return;
       settled = true;
       resolve(snap);
     }
 
-    function tick() {
+    function poll() {
       if (settled) return;
       var snap = snapshotNow();
-      if (snap.presentable && snap.sig === state.lastSig) {
-        state.stableFrames += 1;
-        if (state.stableFrames >= 2) {
-          state.lastSig = snap.sig;
-          state.stableFrames = 0;
+      var now = Date.now();
+
+      if (snap.presentable) {
+        if (presentableSince < 0) presentableSince = now;
+        if (now - presentableSince >= SETTLE_MS) {
           finish(snap);
           return;
         }
       } else {
-        state.stableFrames = 0;
+        presentableSince = -1;
       }
-      state.lastSig = snap.sig;
-      requestAnimationFrame(tick);
+
+      if (now - start >= MAX_WAIT_MS) {
+        // Report current status; the caller decides (re-invoke or finish).
+        finish({ presentable: false, waiting: true, challenge: snap.challenge, snapshot: snap });
+        return;
+      }
+
+      setTimeout(poll, 100);
     }
 
-    // Observe DOM mutations so we re-tick on real changes; rAF drive covers
-    // canvas/font-paint settle that mutations miss.
-    if (state.observers === 0 && window.MutationObserver) {
-      var mo = new MutationObserver(function () {
-        state.stableFrames = 0;
-      });
-      mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
-      state.observers = 1;
-    }
+    poll();
 
-    // Instant-check first (fast pages resolve on the first tick).
-    var first = snapshotNow();
-    if (first.presentable) {
-      state.lastSig = first.sig;
-      state.stableFrames = 1;
-    }
-    requestAnimationFrame(tick);
-
-    // Cross-navigation safety: a meta-refresh to tg:// or hard reload wipes
-    // our window — re-resolve is handled by the caller re-invoking us.
-    window.addEventListener("pagehide", function () {
-      settled = true; // abandon; caller sees navigation and re-invokes
-    });
+    // Navigations abandon this invocation instantly; the caller's outer loop
+    // re-invokes the (stateless) predicate on the new document.
+    window.addEventListener(
+      "pagehide",
+      function () {
+        finish({ presentable: false, waiting: true, navigated: true });
+      },
+      { once: true },
+    );
   });
 }
 
 /**
- * Wait until the page is actually presentable — EVENT-DRIVEN. The predicate
- * above runs inside the page and resolves at the first instant the page is
- * real (or as soon as a challenge clears). No polling windows, no dwell:
- * a normal page finishes in ~100-500ms after its content exists; a challenge
- * finishes the moment it clears, 2s or 2min — never an artificial wait.
+ * Wait until the page is actually presentable — EVENT-DRIVEN with a
+ * wall-clock settle window. The stateless in-page predicate resolves when
+ * the page has stayed presentable for PRESENTABLE_SETTLE_MS; the outer loop
+ * re-invokes it (cheap — no page state involved) until success or ceiling.
+ *
+ * Normal pages: ~1s after their content exists (settle window).
+ * Challenges: exactly as long as the challenge takes, once cleared content
+ * holds and it resolves immediately — no artificial floor or dwell.
  */
 export async function waitForPageContent(
   page: Page,
@@ -331,8 +338,8 @@ export async function waitForPageContent(
 
     let fired: any = null;
     try {
-      // Race the in-page predicate against the ceiling for THIS navigation;
-      // the predicate survives via window.__steelReadiness between calls.
+      // Stateless predicate: resolves presentable, or status:"waiting" after
+      // its in-page budget, or immediately on navigation (pagehide).
       fired = await Promise.race([
         page.evaluate(installReadinessPredicate).catch(() => null),
         new Promise((r) => setTimeout(() => r(null), 5_000)),
@@ -341,8 +348,12 @@ export async function waitForPageContent(
       fired = null;
     }
 
+    if (fired && fired.snapshot) {
+      lastSnapshot = fired.snapshot as ContentSnapshot;
+    }
+
     if (fired && fired.presentable) {
-      lastSnapshot = fired as ContentSnapshot;
+      lastSnapshot = (fired.snapshot ?? lastSnapshot) as ContentSnapshot;
       const waitedMs = Date.now() - start;
       log(
         `[waitForContent] Page presentable after ${waitedMs}ms` +
@@ -365,9 +376,9 @@ export async function waitForPageContent(
       }
     }
 
-    // Not presentable yet: the predicate stays installed in the page (rAF
-    // loop) — re-poll briefly to pick up its resolution or a navigation.
-    await new Promise((r) => setTimeout(r, 150));
+    // Not presentable yet: re-invoke the stateless predicate (fresh closure,
+    // re-measures the settle window on the CURRENT DOM) after a short pause.
+    await new Promise((r) => setTimeout(r, POLL_MS));
   }
 
   const waitedMs = Date.now() - start;

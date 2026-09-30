@@ -160,7 +160,94 @@ print(f"  {pid[:8]}: {out}  (expect 1440,950)")
 PY
 
 echo
-echo "=== 6) Xvfb leftovers ==="
+echo "=== 6) SHARED-BROWSER scrape E2E: animated/heavy pages (the real product path) ==="
+# These run /v1/scrape (shared-browser path, browser-per-job). They assert the
+# FIX for the two user-reported failures:
+#   - a fully loaded ANIMATED page must NOT hang to the 45s ceiling,
+#   - a t.me page must NOT quit while still blank white.
+scrape() {
+  curl -s --max-time 120 -X POST "http://127.0.0.1:${PORT}/v1/scrape" \
+    -H "Content-Type: application/json" -d "{\"url\":\"$1\",\"format\":[\"markdown\"]}"
+}
+
+# 6a) pulsetic.com — animated marketing page (hero carousel etc). Page fully
+# rendered but continuously mutating: the old mutation-gated predicate hung to
+# the 45s ceiling here. Must release well under the ceiling with real content.
+echo "  [pulsetic.com — animated page, must not hang to ceiling]"
+PULS_T0=$(date +%s%3N)
+scrape "https://pulsetic.com/" > /tmp/v-pulsetic.json
+PULS_MS=$(( $(date +%s%3N) - PULS_T0 ))
+python3 - "$PULS_MS" <<'PY'
+import json, sys
+wall = int(sys.argv[1])
+d = json.load(open('/tmp/v-pulsetic.json'))
+md = ((d.get('content') or {}).get('markdown') or '')
+wait = (d.get('metadata') or {}).get('times', {}).get('contentReadyWaitMs')
+print(f"    wallMs={wall} contentReadyWaitMs={wait} markdownChars={len(md)}")
+if len(md) < 200:
+    print(f"  FAIL  pulsetic scrape: markdown too small ({len(md)} chars)"); sys.exit(1)
+if wall > 25000:
+    print(f"  FAIL  pulsetic scrape took {wall}ms — hang regression (ceiling reached)"); sys.exit(1)
+print(f"  PASS  pulsetic released fast on a rendered animated page")
+PY
+[ $? -ne 0 ] && bad "pulsetic animated-page scrape" || ok "pulsetic animated-page scrape"
+
+# 6b) crackingx.com — Cloudflare/JS-heavy site. Must release (challenge or
+# not) with real content and well under the ceiling.
+echo "  [crackingx.com — challenge/JS-heavy page]"
+CRX_T0=$(date +%s%3N)
+scrape "https://crackingx.com/threads/95694/" > /tmp/v-crx.json
+CRX_MS=$(( $(date +%s%3N) - CRX_T0 ))
+python3 - "$CRX_MS" <<'PY'
+import json, sys
+wall = int(sys.argv[1])
+d = json.load(open('/tmp/v-crx.json'))
+md = ((d.get('content') or {}).get('markdown') or '')
+print(f"    wallMs={wall} markdownChars={len(md)}")
+if wall > 40000:
+    print(f"  FAIL  crackingx scrape took {wall}ms — ceiling reached on a loadable page"); sys.exit(1)
+if len(md) < 300:
+    print(f"  FAIL  crackingx scrape: markdown too small ({len(md)} chars)"); sys.exit(1)
+print(f"  PASS  crackingx released with content (no ceiling burn)")
+PY
+[ $? -ne 0 ] && bad "crackingx scrape" || ok "crackingx scrape"
+
+# 6c) t.me — the OTHER user failure: page quit while still blank. The scrape
+# must return non-empty t.me content (profile page renders text). If the
+# readiness bar fires on a white page, markdown comes back tiny/empty.
+echo "  [t.me/cracxAds — must NOT release while page is blank]"
+TME_T0=$(date +%s%3N)
+scrape "https://t.me/cracxAds" > /tmp/v-tme.json
+TME_MS=$(( $(date +%s%3N) - TME_T0 ))
+python3 - "$TME_MS" <<'PY'
+import json, sys
+wall = int(sys.argv[1])
+d = json.load(open('/tmp/v-tme.json'))
+md = ((d.get('content') or {}).get('markdown') or '')
+meta = json.dumps((d.get('metadata') or {}))
+print(f"    wallMs={wall} markdownChars={len(md)}")
+if len(md) < 80:
+    print(f"  FAIL  t.me released while page still blank (markdown {len(md)} chars)"); sys.exit(1)
+if wall > 40000:
+    print(f"  FAIL  t.me scrape hit the ceiling ({wall}ms)"); sys.exit(1)
+print("  PASS  t.me scraped real rendered content (no early-quit)")
+PY
+[ $? -ne 0 ] && bad "t.me early-quit guard" || ok "t.me early-quit guard"
+
+# 6d) session must be RELEASED after each scrape (no stuck Live sessions).
+python3 - <<'PY'
+import json, subprocess, time
+rows = json.loads(subprocess.run(['curl','-s','--max-time','10','http://127.0.0.1:3000/v1/sessions'],capture_output=True,text=True).stdout)['sessions']
+live = [r for r in rows if r.get('status') == 'live']
+if live:
+    print(f"  FAIL  {len(live)} session(s) still Live after scrapes: {[r['id'][:8] for r in live]}")
+    raise SystemExit(1)
+print("  PASS  no stuck Live sessions (browser-per-job teardown intact)")
+PY
+[ $? -ne 0 ] && bad "session teardown" || ok "session teardown"
+
+echo
+echo "=== 7) Xvfb leftovers ==="
 ps aux | grep '[X]vfb :' | grep -v ':10 ' || echo "  none-extra"
 echo
 echo "verification done"
