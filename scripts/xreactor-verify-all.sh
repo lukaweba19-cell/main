@@ -234,20 +234,21 @@ PY
 [ $? -ne 0 ] && bad "distinct displays (no :10)" || ok "distinct displays (no :10)"
 
 # Private recordings: each concurrent job films exactly its own display.
+# The sessions API omits recording metadata; take the 3 scrape session ids
+# from the launch log and ffprobe their files directly (same as section 5).
 python3 - <<'PY'
-import json, subprocess, sys
-rows = json.loads(subprocess.run(['curl','-s','--max-time','10','http://127.0.0.1:3000/v1/sessions'],capture_output=True,text=True).stdout)['sessions']
-withrec = [r for r in rows[:5] if r.get('recordingFile')]
-print(f"    newest 5 session rows with a recording: {len(withrec)}")
-if len(withrec) < 3:
-    print(f"  FAIL  expected >=3 recordings from the concurrent scrapes, got {len(withrec)}"); sys.exit(1)
+import re, subprocess, sys
+log = open('/root/steel-browser/steel-api.log', 'rb').read()[-800000:].decode('utf-8', 'ignore')
+sids = re.findall(r'\[scrape\] isolated browser: session=([0-9a-f-]{36})', log)[-3:]
+if len(sids) < 3 or len(set(sids)) != 3:
+    print(f"  FAIL  expected 3 distinct scrape session ids, got {sids}"); sys.exit(1)
 ok_geo = 0
-for r in withrec[:3]:
-    f = f"/data/recordings/{r['recordingFile']}"
+for sid in sids:
+    f = f"/data/recordings/{sid}.mp4"
     out = subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=width,height','-of','csv=p=0',f],capture_output=True,text=True).stdout.strip()
+    print(f"    {sid[:8]}: {out or 'MISSING'}")
     if out == "1440,950":
         ok_geo += 1
-print(f"    recordings at private-display geometry 1440x950: {ok_geo}/3")
 if ok_geo < 3:
     print("  FAIL  recordings are not private-display geometry (mixed/missing frames)"); sys.exit(1)
 print("  PASS  3 private recordings, each exactly its own display")

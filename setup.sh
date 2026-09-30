@@ -196,6 +196,17 @@ ensure_dirs() {
   # Kill orphaned ffmpeg screen recorders from previous runs — a leaked one
   # burns a full CPU core encoding an idle screen (the VM is 3 cores).
   pkill -f 'ffmpeg.*x11grab' 2>/dev/null || true
+  # Free any Xvfb display numbers the allocator uses (:11+) left over from a
+  # crashed run — stale locks would make the display allocator skip numbers
+  # until it exhausted its range. The shared production display :10 stays up.
+  for pid in \
+    $(pgrep -f 'Xvfb :1[1-9]' 2>/dev/null) \
+    $(pgrep -f 'Xvfb :[2-9][0-9]' 2>/dev/null); do
+    kill -9 "${pid}" 2>/dev/null || true
+  done
+  for n in $(seq 11 39); do
+    rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}" 2>/dev/null || true
+  done
   sleep 1
   rm -f /tmp/steel-chrome/Singleton* 2>/dev/null || true
   rm -rf /tmp/xreactor-profile-* /tmp/xreactor-uploaded-* 2>/dev/null || true
