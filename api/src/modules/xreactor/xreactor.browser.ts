@@ -15,6 +15,7 @@ import {
   hasRealContent,
 } from "../../utils/scrape/content-ready.js";
 import { ScrapePool } from "../../utils/scrape/scrape-pool.js";
+import { installReadinessPredicate } from "../../utils/scrape/content-ready.js";
 import { acquireXvfbDisplay, type XvfbDisplay } from "./xvfb-display.js";
 
 /**
@@ -161,86 +162,56 @@ export async function launchIsolatedBrowser(
 export { BrowserNotFoundError as XReactorBrowserNotFoundError };
 
 /**
- * Lightweight page-ready detection for compliance checks — exits the moment
- * the page is actually presentable, never later:
+ * Page-ready detection for compliance checks — FULLY EVENT-DRIVEN, zero
+ * fixed waits:
  *
- *   1. `waitForLoadState("load")` rides the browser's load event.
- *   2. Content-rich snapshot (>=200 chars or >=5 tracked tags) => done
- *      immediately (typical pages: 1-2s).
- *   3. SMALL pages (t.me profiles are ~45 chars) would never pass a size bar
- *      and used to burn the whole challenge ceiling — instead they finish as
- *      soon as the snapshot is STABLE: two consecutive polls with an identical
- *      title/chars/tags signature and zero challenge flags (~1.5s dwell).
- *   4. Challenge interstitials keep polling until they clear (Cloudflare
- *      solves reload the page, so "challenge flag gone" is NOT enough — we
- *      keep polling through the reload until the reloaded page is presentable).
- *      Transient null snapshots during navigation are retried, never "done".
+ * The same in-page readiness predicate the scrape path uses runs inside the
+ * check browser and resolves the instant the page is presentable (not a
+ * challenge, content rendered, DOM stable across one frame). A normal page
+ * resolves ~100-500ms after its content exists; a challenge resolves the
+ * moment it clears — 2s or 2min, never an artificial window.
  *
- * The ceiling (XREACTOR_CHALLENGE_TIMEOUT_MS, default 20s) is only a failure
- * bound for pages that never render; happy pages leave in 1-3 seconds.
+ * `challengeTimeoutMs` is ONLY a failure ceiling for pages that never render
+ * (dead tab, unsolvable challenge) — the normal path never reaches it.
  */
 export async function waitForCheckReady(
   page: Page,
-  opts: { readyTimeoutMs?: number; challengeTimeoutMs?: number } = {},
+  opts: { challengeTimeoutMs?: number } = {},
 ): Promise<{ waitedMs: number; challengeCleared: boolean; contentReady: boolean }> {
   const start = Date.now();
-  const readyTimeoutMs = opts.readyTimeoutMs ?? 8_000;
   const challengeTimeoutMs =
     opts.challengeTimeoutMs ??
-    Math.max(5_000, parseInt(process.env.XREACTOR_CHALLENGE_TIMEOUT_MS || "20000", 10) || 20_000);
+    Math.max(5_000, parseInt(process.env.XREACTOR_CHALLENGE_TIMEOUT_MS || "45000", 10) || 45_000);
 
-  // 1) Event-driven load wait — but CAPPED SHORT. Some pages (t.me profiles)
-  //    never fire `load` promptly: a hanging subresource keeps it pending 9s+
-  //    while the DOM is already fully rendered. The snapshot loop below is
-  //    the real readiness decider, so this is only a fast-path accelerant:
-  //    1.5s max, then we start snapshotting whatever is on screen.
-  await page.waitForLoadState("load", { timeout: Math.min(1_500, readyTimeoutMs) }).catch(() => {});
+  let challengeSeen = false;
 
-  if (page.isClosed()) {
-    return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: false };
-  }
-
-  // 2) Fast path: content already present.
-  let snap = await snapshotPage(page).catch(() => null);
-  if (snap && !snap.challenge && hasRealContent(snap)) {
-    return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: true };
-  }
-
-  // 3) Poll: challenges wait to clear; everything else finishes as soon as
-  //    the snapshot is stable (two identical polls 400ms apart => ~0.8s dwell
-  //    for small pages like t.me profiles, down from ~1.8s at 600ms).
-  let challengeCleared = false;
-  let lastSignature: string | null = null;
-  let stableCount = 0;
-  const deadline = Date.now() + challengeTimeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 400));
-    if (page.isClosed()) break;
-    snap = await snapshotPage(page).catch(() => null);
-    if (!snap) {
-      // navigation in flight — retry, never treat as done
-      lastSignature = null;
-      stableCount = 0;
-      continue;
+  while (Date.now() - start < challengeTimeoutMs) {
+    if (page.isClosed()) {
+      return { waitedMs: Date.now() - start, challengeCleared: false, contentReady: false };
     }
-    if (snap.challenge) {
-      challengeCleared = true;
-      lastSignature = null;
-      stableCount = 0;
-      continue; // still solving
+
+    let fired: any = null;
+    try {
+      fired = await Promise.race([
+        page.evaluate(installReadinessPredicate).catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 5_000)),
+      ]);
+    } catch {
+      fired = null;
     }
-    const signature = `${snap.title}|${snap.contentChars}|${snap.tagCount}|${snap.readyState}`;
-    if (signature === lastSignature) {
-      stableCount += 1;
-      if (stableCount >= 2 && (snap.contentChars > 0 || snap.tagCount > 0)) {
-        return { waitedMs: Date.now() - start, challengeCleared, contentReady: true };
-      }
-    } else {
-      lastSignature = signature;
-      stableCount = 0;
+
+    if (fired && fired.presentable) {
+      return { waitedMs: Date.now() - start, challengeCleared: challengeSeen, contentReady: true };
     }
+    if (fired && fired.challenge) {
+      challengeSeen = true;
+    }
+
+    // Predicate stays installed in-page (rAF loop); brief re-poll picks up
+    // its resolution or a navigation without adding any dwell.
+    await new Promise((r) => setTimeout(r, 150));
   }
-  return { waitedMs: Date.now() - start, challengeCleared, contentReady: false };
+  return { waitedMs: Date.now() - start, challengeCleared: challengeSeen, contentReady: false };
 }
 
 /**

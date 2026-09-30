@@ -169,8 +169,7 @@ export const handleScrape = async (
         if (!isPdf && !isJson) {
           const contentStart = Date.now();
           content = await waitForPageContent(page, {
-            timeoutMs: 60_000,
-            pollMs: 750,
+            timeoutMs: 45_000,
             log: (msg) => request.log.info(msg),
           });
           times.contentReadyWaitMs = content.waitedMs;
@@ -530,7 +529,7 @@ export const handleScreenshot = async (
           }
           await page.goto(normalizedUrl, { timeout: 45000, waitUntil: "domcontentloaded" });
           // Automatic readiness — no fixed delay.
-          const content = await waitForPageContent(page, { timeoutMs: 30_000, pollMs: 750 });
+          const content = await waitForPageContent(page, { timeoutMs: 45_000 });
           times.contentReadyWaitMs = content.waitedMs;
         }
 
@@ -581,7 +580,7 @@ export const handlePDF = async (
             throw new Error(`Invalid URL: ${url}`);
           }
           await page.goto(normalizedUrl, { timeout: 45000, waitUntil: "domcontentloaded" });
-          const content = await waitForPageContent(page, { timeoutMs: 30_000, pollMs: 750 });
+          const content = await waitForPageContent(page, { timeoutMs: 45_000 });
           times.contentReadyWaitMs = content.waitedMs;
         }
 

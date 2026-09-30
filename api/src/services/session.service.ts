@@ -243,12 +243,22 @@ export class SessionService {
 
     // The browser reports its own real user agent; surface it in session details.
     const userAgent = (await this.cdpService.getLiveUserAgent()) || "";
+    // Browser events are tagged with the primary page's CDP target id — the
+    // UI's Console/Network tabs query /v1/logs/query?pageId=<this>, so it
+    // must be the SAME id the instrumentation stamps (not the session uuid).
+    const primaryPage = await this.cdpService
+      .getPrimaryPage()
+      .catch(() => null);
+    const logPageId = primaryPage
+      ? await this.cdpService.getTargetId(primaryPage)
+      : "";
     Object.assign(this.activeSession, {
       websocketUrl: getBaseUrl("ws"),
       debugUrl: getUrl("v1/sessions/debug"),
       debuggerUrl: getUrl("v1/devtools/inspector.html"),
       sessionViewerUrl: getBaseUrl(),
       userAgent,
+      logPageId: logPageId || undefined,
       dimensions: this.cdpService.getDimensions(),
       deviceConfig,
     });

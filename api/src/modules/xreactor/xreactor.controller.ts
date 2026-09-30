@@ -108,22 +108,28 @@ async function visitPage(
 
     verdict.finalUrl = page.url();
 
-    // Links come from the raw DOM — markdown strips hrefs. JS-rendered pages
-    // populate <a> elements after load, so wait (event-driven) until anchors
-    // exist before harvesting; SHORT cap (1.5s) — genuinely link-less pages
-    // (t.me profiles with only tg:// buttons) fall through fast instead of
-    // burning 6s.
+    // Links come from the raw DOM — markdown strips hrefs. The readiness
+    // predicate already waited for a stable DOM (event-driven, no dwell),
+    // so a page with anchors has them NOW; JS-rendered late anchors get a
+    // single short mutation-based grace only if the harvest came back empty.
     let candidates: ClassifiedLink[] = [];
     let skipped = EMPTY_SKIPPED;
     if (!isPdf) {
-      await page
-        .waitForFunction(() => document.links && document.links.length > 0, { timeout: 1_500 })
-        .catch(() => {}); // genuinely link-less pages just fall through
-
       const rawHtml = await page.content();
-      const harvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
-      candidates = harvest.candidates;
-      skipped = harvest.skipped;
+      const firstHarvest = harvestLinks(rawHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
+      candidates = firstHarvest.candidates;
+      skipped = firstHarvest.skipped;
+      if (candidates.length === 0) {
+        // Link-less at stable DOM — give JS rendering one last brief chance
+        // (300ms), then accept the page as genuinely link-less.
+        await page
+          .waitForFunction(() => document.links && document.links.length > 0, { timeout: 300 })
+          .catch(() => {});
+        const retryHtml = await page.content();
+        const retry = harvestLinks(retryHtml, verdict.finalUrl || url, MAX_LINKS_PER_PAGE);
+        candidates = retry.candidates;
+        skipped = retry.skipped;
+      }
 
       // Telegram profile pages (t.me/<channel>) put the channel's advertised
       // link in the BIO TEXT, not in an anchor — and the page's only DOM

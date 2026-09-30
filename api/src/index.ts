@@ -79,6 +79,14 @@ const setupServer = async () => {
     fileStorage: {
       maxSizePerSession: 100 * MB,
     },
+    // Persist browser events (Console/Network tabs in the UI). Without this
+    // the in-memory store (1000 events, wiped on restart) is used, and
+    // session log queries come back empty.
+    logging: {
+      enableStorage: true,
+      enableConsoleLogging: true,
+      enableLogsRoutes: true,
+    },
   });
 
   // CDP HTTP proxy AFTER steel plugin so cdpService can auto-launch if needed
