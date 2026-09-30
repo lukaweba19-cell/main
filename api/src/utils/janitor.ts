@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { reapOrphanRecorders } from "./scrape/page-recording.js";
 
 /**
  * Server hygiene: keeps recordings and session history from growing forever.
@@ -71,19 +72,28 @@ export function flushOldSessionHistory(
 }
 
 /** One maintenance pass over recordings, session history and tmp profiles. */
-export function runMaintenancePass(
+export async function runMaintenancePass(
   pastSessions: Array<{ createdAt?: string }>,
   log: (msg: string) => void,
   sweepProfiles?: (maxAgeMs?: number) => number,
-): void {
+): Promise<void> {
   const rec = flushOldRecordings();
   const sessions = flushOldSessionHistory(pastSessions);
   const profiles = sweepProfiles ? sweepProfiles() : 0;
-  if (rec.filesRemoved || sessions || profiles) {
+  // Kill ffmpeg x11grab processes whose session is gone — leaked encoders
+  // burn a full CPU core each and made the whole VM feel laggy.
+  let orphans = 0;
+  try {
+    orphans = await reapOrphanRecorders();
+  } catch {
+    // best-effort
+  }
+  if (rec.filesRemoved || sessions || profiles || orphans) {
     log(
       `[janitor] flushed ${rec.filesRemoved} recording(s) (${(
         rec.bytesFreed / 1024 / 1024
-      ).toFixed(1)} MB), ${sessions} old session(s), ${profiles} stale profile(s)`,
+      ).toFixed(1)} MB), ${sessions} old session(s), ${profiles} stale profile(s)` +
+        (orphans ? `, killed ${orphans} orphaned recorder(s)` : ""),
     );
   }
 }
@@ -129,15 +139,17 @@ export function startMaintenanceLoop(
 
   const timer = setInterval(
     () => {
-      try {
-        runMaintenancePass(pastSessions, log, sweepProfiles);
-        if (Date.now() - lastDailyFlush >= DAY_MS) {
-          dailyFlush(pastSessions, log, sweepProfiles);
-          lastDailyFlush = Date.now();
+      void (async () => {
+        try {
+          await runMaintenancePass(pastSessions, log, sweepProfiles);
+          if (Date.now() - lastDailyFlush >= DAY_MS) {
+            dailyFlush(pastSessions, log, sweepProfiles);
+            lastDailyFlush = Date.now();
+          }
+        } catch (e) {
+          log(`[janitor] maintenance pass failed: ${e instanceof Error ? e.message : String(e)}`);
         }
-      } catch (e) {
-        log(`[janitor] maintenance pass failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
+      })();
     },
     MAINTENANCE_INTERVAL_MS,
   );

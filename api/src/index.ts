@@ -19,6 +19,7 @@ import {
   flushOldRecordings,
 } from "./utils/janitor.js";
 import { sweepStaleProfiles } from "./modules/xreactor/xreactor.browser.js";
+import { reapOrphanRecorders } from "./utils/scrape/page-recording.js";
 
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -97,9 +98,13 @@ const startServer = async () => {
       const pastSessions = server.sessionService.pastSessions as Array<{ createdAt?: string }>;
       const flushed = clearAllSessionHistory(pastSessions);
       const recs = flushOldRecordings();
-      if (flushed || recs.filesRemoved) {
+      // Kill ffmpeg x11grab orphans from previous runs immediately — a leaked
+      // encoder burns a full core (this exact leak made the VM feel laggy).
+      const reaped = await reapOrphanRecorders();
+      if (flushed || recs.filesRemoved || reaped) {
         server.log.info(
-          `[janitor] startup flush: ${flushed} stale session(s), ${recs.filesRemoved} old recording(s)`,
+          `[janitor] startup flush: ${flushed} stale session(s), ${recs.filesRemoved} old recording(s)` +
+            (reaped ? `, killed ${reaped} orphaned recorder(s)` : ""),
         );
       }
       startMaintenanceLoop(pastSessions, (msg) => server.log.info(msg), sweepStaleProfiles);

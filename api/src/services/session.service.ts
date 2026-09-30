@@ -257,6 +257,17 @@ export class SessionService {
   }
 
   public async endSession(options?: { relaunchIdle?: boolean }): Promise<SessionDetails> {
+    // Stop the session video recorder if one is still attached. The happy
+    // path (scrape/screenshot) stops it explicitly, but a thrown scrape used
+    // to leak the ffmpeg x11grab child — it kept encoding an idle screen
+    // forever (~35% of a core each on this VM).
+    try {
+      const leakedRecorder = (this.activeSession as any).__recorder;
+      if (leakedRecorder?.stop) {
+        (this.activeSession as any).__recorder = null;
+        await leakedRecorder.stop();
+      }
+    } catch {}
     try {
       flushRecording(this.activeSession.id);
     } catch {}

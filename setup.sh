@@ -193,6 +193,9 @@ ensure_dirs() {
   pkill -f 'remote-debugging-port' 2>/dev/null || true
   # Stop any sidecar from a previous API run so it can't serve stale code.
   pkill -f 'nodriver_launcher.py' 2>/dev/null || true
+  # Kill orphaned ffmpeg screen recorders from previous runs — a leaked one
+  # burns a full CPU core encoding an idle screen (the VM is 3 cores).
+  pkill -f 'ffmpeg.*x11grab' 2>/dev/null || true
   sleep 1
   rm -f /tmp/steel-chrome/Singleton* 2>/dev/null || true
   rm -rf /tmp/xreactor-profile-* /tmp/xreactor-uploaded-* 2>/dev/null || true
