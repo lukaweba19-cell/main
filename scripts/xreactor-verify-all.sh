@@ -165,8 +165,10 @@ echo "=== 6) SHARED-BROWSER scrape E2E: animated/heavy pages (the real product p
 # FIX for the two user-reported failures:
 #   - a fully loaded ANIMATED page must NOT hang to the 45s ceiling,
 #   - a t.me page must NOT quit while still blank white.
+# Scrape and echo wall-clock seconds via curl's own timer (VM 'date' lacks %N).
 scrape() {
-  curl -s --max-time 120 -X POST "http://127.0.0.1:${PORT}/v1/scrape" \
+  local t_out="$2"
+  curl -s --max-time 120 -w "%{time_total}" -o "$t_out" -X POST "http://127.0.0.1:${PORT}/v1/scrape" \
     -H "Content-Type: application/json" -d "{\"url\":\"$1\",\"format\":[\"markdown\"]}"
 }
 
@@ -174,9 +176,8 @@ scrape() {
 # rendered but continuously mutating: the old mutation-gated predicate hung to
 # the 45s ceiling here. Must release well under the ceiling with real content.
 echo "  [pulsetic.com — animated page, must not hang to ceiling]"
-PULS_T0=$(date +%s%3N)
-scrape "https://pulsetic.com/" > /tmp/v-pulsetic.json
-PULS_MS=$(( $(date +%s%3N) - PULS_T0 ))
+PULS_MS=$(scrape "https://pulsetic.com/" /tmp/v-pulsetic.json)
+PULS_MS=$(python3 -c "print(int(float('$PULS_MS')*1000))")
 python3 - "$PULS_MS" <<'PY'
 import json, sys
 wall = int(sys.argv[1])
@@ -195,9 +196,8 @@ PY
 # 6b) crackingx.com — Cloudflare/JS-heavy site. Must release (challenge or
 # not) with real content and well under the ceiling.
 echo "  [crackingx.com — challenge/JS-heavy page]"
-CRX_T0=$(date +%s%3N)
-scrape "https://crackingx.com/threads/95694/" > /tmp/v-crx.json
-CRX_MS=$(( $(date +%s%3N) - CRX_T0 ))
+CRX_MS=$(scrape "https://crackingx.com/threads/95694/" /tmp/v-crx.json)
+CRX_MS=$(python3 -c "print(int(float('$CRX_MS')*1000))")
 python3 - "$CRX_MS" <<'PY'
 import json, sys
 wall = int(sys.argv[1])
@@ -216,9 +216,8 @@ PY
 # must return non-empty t.me content (profile page renders text). If the
 # readiness bar fires on a white page, markdown comes back tiny/empty.
 echo "  [t.me/cracxAds — must NOT release while page is blank]"
-TME_T0=$(date +%s%3N)
-scrape "https://t.me/cracxAds" > /tmp/v-tme.json
-TME_MS=$(( $(date +%s%3N) - TME_T0 ))
+TME_MS=$(scrape "https://t.me/cracxAds" /tmp/v-tme.json)
+TME_MS=$(python3 -c "print(int(float('$TME_MS')*1000))")
 python3 - "$TME_MS" <<'PY'
 import json, sys
 wall = int(sys.argv[1])
