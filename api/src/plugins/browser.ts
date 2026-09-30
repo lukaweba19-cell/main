@@ -9,6 +9,7 @@ import {
 } from "../services/cdp/instrumentation/storage/index.js";
 import path from "path";
 import os from "os";
+import fs from "fs";
 import { env } from "../env.js";
 
 declare module "fastify" {
@@ -32,6 +33,9 @@ const browserInstancePlugin: FastifyPluginAsync = async (fastify, _options) => {
       loggingConfig.storagePath ||
       env.LOG_STORAGE_PATH ||
       path.join(os.tmpdir(), "steel-browser-logs", "logs.duckdb");
+
+    // DuckDB does not create missing parent directories.
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
 
     storage = new DuckDBStorage({
       dbPath: storagePath,
