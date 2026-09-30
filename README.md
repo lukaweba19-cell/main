@@ -2,7 +2,7 @@
 
 Patched-down Steel Browser monorepo (`api` + `ui` + `repl`) running headful on
 Xvfb with automatic extension loading and automatic video recording of every
-scrape/session.
+scrape job and session.
 
 ## Browser engine: nodriver + stock Chrome
 
@@ -18,24 +18,36 @@ the process launcher differs.
 - The Python sidecar runs from `api/python/.venv` (deps in
   `api/python/requirements.txt`, plus the optional
   [nodriver-cf-verify](https://github.com/omegastrux/nodriver-cf-verify)
-  Turnstile auto-clicker).
+  Turnstile auto-clicker). Each launch gets its own free CDP port (`port: 0`),
+  so concurrent browsers never fight over a fixed debug port.
+- Extensions load over CDP (`Extensions.loadUnpacked`) after launch — the
+  command-line `--load-extension` path is dead on branded Chrome ≥ 137 and is
+  not used anywhere.
 - The engine is reported by `GET /v1/health` as `{"status":"ok","browser":"chrome",
-  "browserRunning":false}` (`browserRunning` is true while a session is live).
+  "browserRunning":false}` (`browserRunning` is true while the session browser
+  is live; the browser starts on demand with the first session/scrape).
 
 ### Persistent fingerprint (one identity, every launch)
 
 There are no per-launch fingerprint seeds anywhere. The fingerprint IS the
 profile: a durable default profile at `/data/steel-profiles/default` holds the
-fonts, prefs, cookies, language and window metrics, and EVERY browser launch
-reuses it:
+fonts, prefs, cookies, language and window metrics. How each workload uses it:
 
-- sessions & scrapes run on the default profile directly (or `persist: true`),
-- every xreactor check runs on a fresh CLONE of it (temp dir, deleted after),
-- sessions & scrapes can select an uploaded profile with `profileId`
-  (empty/omitted = default); xreactor checks ALWAYS use the default.
+- live sessions run on the default profile directly (or `persist: true`, or an
+  uploaded profile selected with `profileId`; empty/omitted = default),
+- every scrape/screenshot/PDF/search job runs on a fresh CLONE of the default
+  profile (temp dir, deleted with the browser) — or on a materialized uploaded
+  profile when `profileId` is given,
+- every xreactor check runs on a fresh CLONE of it (temp dir, deleted after);
+  the profile is not selectable for xreactor — the default is always the
+  identity there.
 
-Because the same profile directory is reused, any preference the user saves
-("Always allow", fonts, logins) persists across launches and restarts.
+Because the default profile directory itself is durable, any preference the
+user saves ("Always allow", fonts, logins) persists across launches and
+restarts — and every clone inherits it, so the same fingerprint follows every
+job. The seeded external-protocol prefs (`allowed_origin_protocol_pairs`) are
+re-asserted on every clone, so a corrupt/older working copy can never
+resurrect the xdg-open dialog.
 
 ### The "Open xdg-open?" popup: fixed for real
 
@@ -57,22 +69,59 @@ now lives in `external_protocol_handler.cc` →
    even if a launch slips through, `xdg-open` exits 0 instantly — nothing can
    stall the page.
 
+### Concurrent scrapes: an isolated browser per job
+
+`/v1/scrape`, `/v1/search`, `/v1/screenshot` and `/v1/pdf` are truly
+concurrent — no serialization, no shared state, no settle sleeps
+(`api/src/modules/actions/isolated-scrape.ts`):
+
+- **Own browser**: every job launches its own private nodriver Chrome; the
+  sidecar picks a free CDP port per launch.
+- **Own display**: every job gets a dedicated Xvfb display from the production
+  allocator `acquireXvfbDisplay()` (`api/src/modules/xreactor/xvfb-display.ts`)
+  — 1440x950 screens on `:11` and up. The shared production display `:10` is
+  NEVER touched by scrape traffic, so live sessions keep working in parallel.
+- **Own profile**: a fresh clone of the persistent-fingerprint default (or a
+  materialized uploaded profile), deleted with the browser (the removal
+  retries — Chrome flushes profile files briefly after close).
+- **Own recording**: the ffmpeg recorder films exactly that job's display, so
+  concurrent recordings never mix browsers into one frame. Recordings land in
+  `/data/recordings/<sessionId>.mp4` at 1440x950.
+- **Dashboard parity**: the same instrumentation pipeline as live sessions
+  (Console / Navigation / Request / Response events tagged
+  `pageId = sessionId`) feeds `/v1/logs/query`, and a `released` session row
+  is pushed to `pastSessions` — the dashboard shows scrape jobs just like
+  sessions.
+
+Jobs are bounded by the scrape pool (`api/src/utils/scrape/scrape-pool.ts`):
+`SCRAPE_MAX_CONCURRENCY` (default 4 — extra requests queue, they don't fail)
+and `SCRAPE_IDLE_SHUTDOWN_MS` (default 15000 — the sidecar shuts down after
+the pool is idle). Every failure path (bad profile, failed launch, failed CDP
+attach, thrown scrape) still closes the browser, frees the display and deletes
+the clone; `setup.sh` also cleans stale Xvfb `:11+` servers and orphaned
+ffmpeg/sidecar processes on every restart. The live-session browser on `:10`
+is a completely separate path and is never affected.
+
 ## Setup / operations
 
 ```bash
 ./setup.sh              # install deps, build api+ui, start
-./setup.sh restart      # restart after a git pull
-./setup.sh status       # process, health, extensions, UI
+./setup.sh restart      # restart after a git pull (also cleans stale Xvfb :11+)
+./setup.sh status       # process, health, extensions, profiles, UI
 ./setup.sh test         # smoke test: health + scrape example.com
+./setup.sh stop         # stop the server
+./setup.sh build        # build api+ui without starting
 ```
+
+Logs go to `steel-api.log` in the repo root.
 
 ## XReactor endpoint (`/xreactor`)
 
 A dedicated compliance endpoint that answers only via the
 `xreactor-bot.duckdns.org` hostname (HTTPS through Caddy). It takes a `url`
 (string or array) and scrapes each page to markdown in its **own isolated
-CloakBrowser** — never the shared Steel session browser — then reports
-whether any spelling or variant of "cloud" appears:
+nodriver-launched Chrome** — never the shared Steel session browser — then
+reports whether any spelling or variant of "cloud" appears:
 
 - Plain `cloud` and word stems (`clouds`, `cloudy`, `cloudflare`, ...)
 - Leetspeak/homoglyphs: `cl0ud`, `c1oud`, `kl0ud`, `c|oud`, cyrillic/greek o
@@ -108,13 +157,13 @@ ignored.
   `SESSION_HISTORY_MAX_AGE_HOURS`).
 
 ```bash
-# POST
+# The check is POST-only.
 curl -X POST https://xreactor-bot.duckdns.org/xreactor \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 
-# GET
-curl 'https://xreactor-bot.duckdns.org/xreactor?url=https://example.com'
+# GET serves only the Scalar docs page (with or without ?url=).
+curl 'https://xreactor-bot.duckdns.org/xreactor'
 ```
 
 Response:
@@ -164,5 +213,7 @@ check the per-page status when acting on the result.
 
 Requirements: Node >= 22, Python 3 + `api/python/.venv` (nodriver sidecar,
 installed by `./setup.sh`), Chrome/Chromium (auto-installed by `./setup.sh`),
-Xvfb on `:10` (`DISPLAY=:10`) for headful launches. As root, `--no-sandbox` is
+Xvfb — the shared display `:10` (`DISPLAY=:10`) for live sessions plus
+per-job displays `:11+` allocated dynamically for scrapes and xreactor checks
+— and `ffmpeg` for the session/scrape recordings. As root, `--no-sandbox` is
 added automatically.
